@@ -6,6 +6,7 @@ import pytest
 
 from backend.app.config import Settings
 from backend.app.importer import (
+    OPENING_DRAFT_SCHEMA,
     FakeImporter,
     ImporterUnavailable,
     ImportSource,
@@ -242,6 +243,19 @@ async def test_redirect_to_private_host_is_rejected():
             ImportSource.link("https://public.example/job/1")
         )
     await client.aclose()
+
+
+def test_draft_schema_satisfies_strict_mode():
+    # OpenAI strict response_format requires `required` to cover every
+    # property; optional fields must be nullable instead.
+    schema = OPENING_DRAFT_SCHEMA
+    assert sorted(schema["required"]) == sorted(schema["properties"])
+    for name in schema["required"]:
+        prop = schema["properties"][name]
+        assert "null" in (prop.get("type") if isinstance(prop.get("type"), list)
+                          else [prop.get("type")]) or name in (
+            "title", "skills", "criteria",
+        )
 
 
 async def test_import_source_kind_and_labels():

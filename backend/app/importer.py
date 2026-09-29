@@ -54,10 +54,24 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _MAX_FETCH_BYTES = 2 * 1024 * 1024
 _MAX_REDIRECTS = 5
 
+# OpenAI strict mode (used by the gpt-6-luna provider) requires `required`
+# to list every property; optional fields stay nullable instead.
 OPENING_DRAFT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["title", "skills", "criteria"],
+    "required": [
+        "title",
+        "department",
+        "location",
+        "description",
+        "employmentType",
+        "workArrangement",
+        "experienceLevel",
+        "educationLevel",
+        "closesAt",
+        "skills",
+        "criteria",
+    ],
     "properties": {
         "title": {"type": "string"},
         "department": {"type": ["string", "null"]},
