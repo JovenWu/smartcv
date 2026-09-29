@@ -151,7 +151,7 @@ export default function OpeningDetailPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="h-8 min-w-44 text-xs">
+                  <TableHead className="sticky left-0 z-10 h-8 w-36 bg-background text-xs sm:w-44">
                     Candidate
                   </TableHead>
                   {opening.criteria.map((c) => (
@@ -176,11 +176,8 @@ export default function OpeningDetailPage() {
                       </Tooltip>
                     </TableHead>
                   ))}
-                  <TableHead className="h-8 text-right text-xs">
+                  <TableHead className="sticky right-0 z-10 h-8 bg-background text-right text-xs">
                     Score
-                  </TableHead>
-                  <TableHead className="h-8 w-8">
-                    <span className="sr-only">CV</span>
                   </TableHead>
                 </TableRow>
               </TableHeader>
@@ -191,13 +188,14 @@ export default function OpeningDetailPage() {
                     data-state={
                       selected?.id === candidate.id ? "selected" : undefined
                     }
+                    className="group"
                   >
-                    <TableCell className="px-2 py-1.5">
+                    <TableCell className="sticky left-0 z-10 bg-background px-2 py-1.5 group-hover:bg-muted/50 group-data-[state=selected]:bg-muted">
                       <div className="flex flex-col">
-                        <span className="font-medium">
+                        <span className="truncate font-medium">
                           {candidate.name}
                         </span>
-                        <span className="text-xs text-muted-foreground">
+                        <span className="truncate text-xs text-muted-foreground">
                           {candidate.status === "failed" &&
                           candidate.errorMessage
                             ? candidate.errorMessage
@@ -214,19 +212,20 @@ export default function OpeningDetailPage() {
                         />
                       </TableCell>
                     ))}
-                    <TableCell className="px-2 py-1.5 text-right">
-                      <ScoreCell candidate={candidate} />
-                    </TableCell>
-                    <TableCell className="px-2 py-1.5">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 px-2 text-xs"
-                        onClick={() => openCv(candidate)}
-                      >
-                        <EyeIcon />
-                        See CV
-                      </Button>
+                    <TableCell className="sticky right-0 z-10 bg-background px-2 py-1.5 group-hover:bg-muted/50 group-data-[state=selected]:bg-muted">
+                      <div className="flex items-center justify-end gap-1">
+                        <ScoreCell candidate={candidate} />
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          title="See CV"
+                          onClick={() => openCv(candidate)}
+                        >
+                          <EyeIcon />
+                          <span className="hidden sm:inline">See CV</span>
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
