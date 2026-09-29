@@ -32,10 +32,18 @@ function entryFor(openingId: string): CacheEntry {
   return entry
 }
 
-function setList(openingId: string, list: Candidate[]) {
-  entryFor(openingId).list = [...list].sort(
-    (a, b) => a.uploadOrder - b.uploadOrder,
+function rankCandidates(list: Candidate[]): Candidate[] {
+  // Score descending; unscored (queued/processing/failed) sink to the
+  // bottom. uploadOrder breaks ties so rows never jitter on equal scores.
+  return [...list].sort(
+    (a, b) =>
+      (b.totalScore ?? -1) - (a.totalScore ?? -1) ||
+      a.uploadOrder - b.uploadOrder,
   )
+}
+
+function setList(openingId: string, list: Candidate[]) {
+  entryFor(openingId).list = rankCandidates(list)
   emit()
 }
 
@@ -45,7 +53,7 @@ function upsert(openingId: string, candidate: Candidate) {
   const list = [...entry.list]
   if (index === -1) list.push(candidate)
   else list[index] = candidate
-  entry.list = list.sort((a, b) => a.uploadOrder - b.uploadOrder)
+  entry.list = rankCandidates(list)
   emit()
 }
 
@@ -77,16 +85,14 @@ function onEvent(openingId: string, event: string, data: unknown) {
   }
 }
 
-function attach(openingId: string) {
+function ensureStream(openingId: string) {
   const entry = entryFor(openingId)
-  if (entry.loaded) return
-  entry.loaded = true
-  void apiFetch<Candidate[]>(`/api/openings/${openingId}/candidates`)
-    .then((list) => setList(openingId, list))
-    .catch(() => {
-      entry.loaded = false
-    })
-  if (typeof EventSource !== "function") return
+  if (
+    typeof EventSource !== "function" ||
+    (entry.events && entry.events.readyState !== EventSource.CLOSED)
+  ) {
+    return
+  }
   const events = new EventSource(`/api/openings/${openingId}/events`)
   for (const name of [
     "snapshot",
@@ -102,6 +108,18 @@ function attach(openingId: string) {
     // The server closes the stream after opening.complete — that's normal.
   }
   entry.events = events
+}
+
+function attach(openingId: string) {
+  const entry = entryFor(openingId)
+  ensureStream(openingId)
+  if (entry.loaded) return
+  entry.loaded = true
+  void apiFetch<Candidate[]>(`/api/openings/${openingId}/candidates`)
+    .then((list) => setList(openingId, list))
+    .catch(() => {
+      entry.loaded = false
+    })
 }
 
 function detach(openingId: string) {
@@ -156,6 +174,9 @@ export async function addCandidates(
     { method: "POST", body: form },
   )
   response.candidates.forEach((candidate) => upsert(openingId, candidate))
+  // If a previous batch closed the stream via opening.complete, reopen it
+  // so the new uploads stream their updates live.
+  ensureStream(openingId)
   await refreshOpenings()
 }
 
@@ -204,6 +225,7 @@ export async function retryCandidate(
     { method: "POST" },
   )
   upsert(openingId, updated)
+  ensureStream(openingId)
   return updated
 }
 

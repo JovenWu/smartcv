@@ -501,6 +501,11 @@ class SQLiteRepository:
                     for item in items
                 ],
             )
+            # Newly queued work means the opening is no longer terminal —
+            # a previously completed opening must reopen for SSE streams.
+            await self.db.execute(
+                "UPDATE openings SET is_final = 0 WHERE id = ?", (opening_id,)
+            )
             await self.db.commit()
 
     async def get_candidate(

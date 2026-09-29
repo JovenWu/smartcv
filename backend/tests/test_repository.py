@@ -114,6 +114,39 @@ async def test_update_opening_and_decision(repo):
     assert cand.opening_id == "o1"
 
 
+async def test_add_candidates_reopens_terminal_opening(repo):
+    await repo.create_opening("o1", OpeningCreate(title="A"))
+    await repo.add_candidates(
+        "o1",
+        [
+            {
+                "id": "c1",
+                "filename": "a.pdf",
+                "stored_path": "/x",
+                "upload_order": 0,
+                "mime_type": "application/pdf",
+            }
+        ],
+    )
+    await repo.mark_candidate_failed("c1", "bad pdf", retryable=False)
+    assert await repo.mark_opening_complete_if_terminal("o1") is True
+    assert (await repo.get_opening("o1")).is_final is True
+
+    await repo.add_candidates(
+        "o1",
+        [
+            {
+                "id": "c2",
+                "filename": "b.pdf",
+                "stored_path": "/y",
+                "upload_order": 1,
+                "mime_type": "application/pdf",
+            }
+        ],
+    )
+    assert (await repo.get_opening("o1")).is_final is False
+
+
 async def test_update_opening_clears_fields_sent_as_null(repo):
     await repo.create_opening(
         "o1",
