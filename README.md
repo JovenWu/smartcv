@@ -39,6 +39,24 @@ Run the test suite inside the image:
 docker compose run --rm backend python -m pytest backend/tests -q
 ```
 
+## Frontend
+
+React/Vite UI in `frontend/` — the full workflow in one screen: define role
+criteria, review suggested weights, confirm, upload a batch, watch scorecards
+stream in live, then inspect evidence and apply manual overrides.
+
+```bash
+cd frontend
+npm install --legacy-peer-deps
+npm run dev        # http://localhost:5173, proxies /api to :8000
+npm run test -- --run
+npm run build
+```
+
+Start the backend first (`docker compose up`). The dev server proxies all
+`/api/*` calls — including the SSE stream — to the container, so no CORS or
+secrets configuration is needed. `TYPESAFE_API_KEY` stays server-side only.
+
 ## Local development (optional)
 
 Requires Python 3.13 (`py -3.13` on Windows). Without LibreOffice on PATH,
