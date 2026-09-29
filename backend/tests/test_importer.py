@@ -185,6 +185,78 @@ def test_search_page_url_canonicalized():
     ) == "https://example.com/jobs?id=42"
 
 
+async def test_experience_level_becomes_a_criterion():
+    """A stated minimum ('3-5 years') must survive into criteria, not
+    live only in the experienceLevel field."""
+
+    def handler(request):
+        if "openrouter" in str(request.url):
+            return openrouter_response(
+                {
+                    "title": "Backend Engineer",
+                    "experienceLevel": "3-5 years",
+                    "educationLevel": "Bachelor's degree",
+                    "skills": ["Python"],
+                    "criteria": [
+                        {
+                            "name": "Python",
+                            "description": "d",
+                            "required": True,
+                        }
+                    ],
+                }
+            )
+        return httpx.Response(200, content=LISTING_HTML)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    importer = LangGraphImporter(
+        make_settings(), FakeEvaluator(), client
+    )
+    draft = await importer.import_listing(
+        ImportSource.link("https://jobstreet.example/job/1")
+    )
+    names = [c.name for c in draft.criteria]
+    assert "Experience: 3-5 years" in names
+    assert "Education: Bachelor's degree" in names
+    # The appended criteria are weighted like the rest.
+    exp = next(c for c in draft.criteria if c.name.startswith("Experience"))
+    assert exp.required is True
+    assert exp.suggested_weight == 3
+    await client.aclose()
+
+
+async def test_covered_experience_is_not_duplicated():
+    def handler(request):
+        if "openrouter" in str(request.url):
+            return openrouter_response(
+                {
+                    "title": "Backend Engineer",
+                    "experienceLevel": "5+ years",
+                    "skills": ["Python"],
+                    "criteria": [
+                        {
+                            "name": "5+ years backend experience",
+                            "description": "d",
+                            "required": True,
+                        }
+                    ],
+                }
+            )
+        return httpx.Response(200, content=LISTING_HTML)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    importer = LangGraphImporter(
+        make_settings(), FakeEvaluator(), client
+    )
+    draft = await importer.import_listing(
+        ImportSource.link("https://jobstreet.example/job/1")
+    )
+    assert [c.name for c in draft.criteria] == [
+        "5+ years backend experience"
+    ]
+    await client.aclose()
+
+
 async def test_blocked_page_uses_browser_render(monkeypatch):
     async def fake_browser(self, url):
         return "Frontend Engineer at Acme. React, TypeScript. " * 30

@@ -196,7 +196,46 @@ function buildCriteria(input: NewOpeningInput["criteria"]) {
     })
 }
 
+// A stated minimum counts as covered only when a criterion names a
+// concrete span/level — a generic "experience" row does not encode it.
+const YEARS_RE = /\d+\s*[-–+]?\s*\d*\s*(?:years?|yrs?|tahun)/i
+const EDU_RE =
+  /bachelor|master|diploma|degree|doctor|phd|mba|s[123]\b|d[1-4]\b|sarjana|magister/i
+
+function coveredByCriteria(
+  criteria: NewCriterionInput[],
+  pattern: RegExp,
+  level: string,
+): boolean {
+  return criteria.some((c) => {
+    const text = `${c.name} ${c.description ?? ""}`
+    return (
+      pattern.test(text) ||
+      text.toLowerCase().includes(level.toLowerCase())
+    )
+  })
+}
+
 function toPayload(input: NewOpeningInput): NewOpeningPayload {
+  // Stated minimums become concrete, weightable criteria when no
+  // criterion already covers them (mirrors the importer's backstop).
+  const criteriaInput = [...(input.criteria ?? [])]
+  const experience = input.experienceLevel?.trim()
+  if (experience && !coveredByCriteria(criteriaInput, YEARS_RE, experience)) {
+    criteriaInput.push({
+      name: `Experience: ${experience}`,
+      description: `The listing requires ${experience} of relevant experience.`,
+      required: true,
+    })
+  }
+  const education = input.educationLevel?.trim()
+  if (education && !coveredByCriteria(criteriaInput, EDU_RE, education)) {
+    criteriaInput.push({
+      name: `Education: ${education}`,
+      description: `The listing requires ${education}.`,
+      required: true,
+    })
+  }
   return {
     title: input.title.trim(),
     department: input.department?.trim() || undefined,
@@ -209,7 +248,7 @@ function toPayload(input: NewOpeningInput): NewOpeningPayload {
     skills: input.skills?.length ? input.skills : undefined,
     closesAt: input.closesAt,
     source: input.source ?? { type: "manual" },
-    criteria: buildCriteria(input.criteria),
+    criteria: buildCriteria(criteriaInput),
   }
 }
 

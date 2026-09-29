@@ -90,6 +90,51 @@ describe("addOpening", () => {
   })
 })
 
+describe("addOpening criteria backstop", () => {
+  it("turns stated levels into criteria when not covered", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(OPENING), { status: 201 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([OPENING]), { status: 200 }),
+      )
+    vi.stubGlobal("fetch", fetchMock)
+    await addOpening({
+      title: "PM",
+      experienceLevel: "3-5 years",
+      educationLevel: "Bachelor's degree",
+      criteria: [{ name: "Strategy", weight: 4 }],
+    })
+    const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string)
+    const names = body.criteria.map((c: { name: string }) => c.name)
+    expect(names).toContain("Experience: 3-5 years")
+    expect(names).toContain("Education: Bachelor's degree")
+  })
+
+  it("does not duplicate a criterion that already covers it", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(OPENING), { status: 201 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([OPENING]), { status: 200 }),
+      )
+    vi.stubGlobal("fetch", fetchMock)
+    await addOpening({
+      title: "PM",
+      experienceLevel: "5+ years",
+      criteria: [{ name: "5+ years product experience", weight: 4 }],
+    })
+    const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string)
+    expect(
+      body.criteria.map((c: { name: string }) => c.name),
+    ).toEqual(["5+ years product experience"])
+  })
+})
+
 describe("updateOpening", () => {
   it("patches the opening and refreshes the list", async () => {
     const fetchMock = vi

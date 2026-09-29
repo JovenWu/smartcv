@@ -127,7 +127,11 @@ _EXTRACTION_PROMPT = (
     "use null for fields you cannot determine; closesAt must be an ISO date "
     "or null; skills is a flat list of skill names; criteria are the 3-8 "
     "concrete, checkable requirements a CV screener should verify against "
-    "the listing (name, one-sentence description, required flag). "
+    "the listing (name, one-sentence description, required flag). The "
+    "listing's stated minimum experience (e.g. '3-5 years'), education, "
+    "language, or certification requirements must each be their own "
+    "criterion with the concrete value in the name — never leave them "
+    "only in experienceLevel or educationLevel. "
     "Title is the role title. Never invent requirements not implied by the "
     "listing. If the provided text or file does not describe one specific "
     "job opening — for example a category page, a list of search results, "
@@ -645,10 +649,64 @@ class LangGraphImporter:
             )
         return {"draft": draft}
 
+    # A duration requirement counts as covered only when a criterion names
+    # a concrete span ("3-5 years", "2 tahun") — a generic "experience"
+    # criterion does not encode the listing's minimum.
+    _YEARS_RE = re.compile(
+        r"\d+\s*[-–+]?\s*\d*\s*(?:years?|yrs?|tahun)", re.IGNORECASE
+    )
+    _EDU_RE = re.compile(
+        r"bachelor|master|diploma|degree|doctor|phd|mba|"
+        r"s[123]\b|d[1-4]\b|sarjana|magister",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _covered_by_criteria(
+        criteria: list[dict], pattern: re.Pattern, level: str
+    ) -> bool:
+        for criterion in criteria:
+            text = (
+                f"{criterion.get('name', '')} "
+                f"{criterion.get('description', '')}"
+            )
+            if pattern.search(text) or level.lower() in text.lower():
+                return True
+        return False
+
     async def _weights(self, state: ImportState) -> dict:
         draft = state["draft"]
-        criteria = draft.get("criteria") or []
+        criteria = list(draft.get("criteria") or [])
         warnings = list(state["warnings"])
+        # Backstop: stated minimums extracted into the level fields must
+        # also exist as concrete, weightable criteria.
+        experience_level = (draft.get("experienceLevel") or "").strip()
+        if experience_level and not self._covered_by_criteria(
+            criteria, self._YEARS_RE, experience_level
+        ):
+            criteria.append(
+                {
+                    "name": f"Experience: {experience_level}",
+                    "description": (
+                        "The listing requires "
+                        f"{experience_level} of relevant experience."
+                    ),
+                    "required": True,
+                }
+            )
+        education_level = (draft.get("educationLevel") or "").strip()
+        if education_level and not self._covered_by_criteria(
+            criteria, self._EDU_RE, education_level
+        ):
+            criteria.append(
+                {
+                    "name": f"Education: {education_level}",
+                    "description": (
+                        f"The listing requires {education_level}."
+                    ),
+                    "required": True,
+                }
+            )
         if not criteria:
             return {"draft": draft, "warnings": warnings}
         inputs = [
