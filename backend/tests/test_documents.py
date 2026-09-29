@@ -3,9 +3,7 @@ import subprocess
 import zipfile
 from pathlib import Path
 
-import pymupdf
 import pytest
-from docx import Document
 
 from backend.app import documents
 from backend.app.config import Settings
@@ -18,6 +16,11 @@ from backend.app.documents import (
     prepare_evaluation_spans,
 )
 from backend.app.schemas import EvidenceSpan
+from backend.tests.factories import (
+    write_docx,
+    write_multipage_pdf,
+    write_pdf,
+)
 
 
 @pytest.fixture
@@ -25,31 +28,6 @@ def test_settings(tmp_path, monkeypatch):
     settings = Settings(_env_file=None, data_dir=tmp_path / "data")
     monkeypatch.setattr(documents, "get_settings", lambda: settings)
     return settings
-
-
-def write_pdf(path: Path, text: str) -> None:
-    document = pymupdf.open()
-    page = document.new_page()
-    if text:
-        page.insert_text((72, 72), text)
-    document.save(path)
-    document.close()
-
-
-def write_multipage_pdf(path: Path, pages: list[str]) -> None:
-    document = pymupdf.open()
-    for text in pages:
-        page = document.new_page()
-        if text:
-            page.insert_text((72, 72), text)
-    document.save(path)
-    document.close()
-
-
-def write_docx(path: Path, text: str) -> None:
-    document = Document()
-    document.add_paragraph(text)
-    document.save(path)
 
 
 CV_TEXT = (
