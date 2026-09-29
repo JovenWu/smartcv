@@ -31,6 +31,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 
 const MATCH_META: Record<MatchStatus, { icon: typeof CheckIcon; label: string }> = {
   strong: { icon: CheckIcon, label: "Strong" },
@@ -146,10 +151,29 @@ export default function OpeningDetailPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="h-8 text-xs">Candidate</TableHead>
+                  <TableHead className="h-8 min-w-44 text-xs">
+                    Candidate
+                  </TableHead>
                   {opening.criteria.map((c) => (
-                    <TableHead key={c.id} className="h-8 text-xs">
-                      {c.name}
+                    <TableHead key={c.id} className="h-8 max-w-36 text-xs">
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span
+                            tabIndex={0}
+                            className="block truncate font-normal"
+                          >
+                            {c.name}
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-64">
+                          <p className="font-medium">{c.name}</p>
+                          {c.description && (
+                            <p className="text-muted-foreground">
+                              {c.description}
+                            </p>
+                          )}
+                        </TooltipContent>
+                      </Tooltip>
                     </TableHead>
                   ))}
                   <TableHead className="h-8 text-right text-xs">
