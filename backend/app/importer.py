@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 from langgraph.graph import END, START, StateGraph
@@ -123,7 +123,10 @@ _EXTRACTION_PROMPT = (
     "concrete, checkable requirements a CV screener should verify against "
     "the listing (name, one-sentence description, required flag). "
     "Title is the role title. Never invent requirements not implied by the "
-    "listing."
+    "listing. If the provided text or file does not describe one specific "
+    "job opening — for example a category page, a list of search results, "
+    "a homepage, or unrelated content — return the object with title set "
+    "to an empty string."
 )
 
 
@@ -408,17 +411,49 @@ class LangGraphImporter:
             return "search"
         return "extract"
 
-    async def _search(self, state: ImportState) -> dict:
-        source = state["source"]
-        warnings = list(state["warnings"])
+    @staticmethod
+    def _search_query(url: str) -> str:
+        """Readable query from link parts: host + slug words + job id."""
+        parsed = urlparse(url)
+        slug = re.sub(
+            r"[^a-z0-9]+", " ", (parsed.path or "").lower()
+        ).strip()
+        params = parse_qs(parsed.query)
+        job_id = (params.get("jobId") or params.get("id") or [""])[0]
+        return " ".join(
+            part
+            for part in [parsed.hostname or "", slug, job_id, "job posting"]
+            if part
+        )
+
+    async def _tavily_extract(self, url: str, api_key: str) -> str:
+        """Server-side fetch of the exact URL (renders JS, bypasses some
+        bot protection that blocks our direct fetch)."""
+        try:
+            response = await self.client.post(
+                "https://api.tavily.com/extract",
+                json={"api_key": api_key, "urls": [url]},
+                timeout=self.settings.import_fetch_timeout,
+            )
+            response.raise_for_status()
+            results = response.json().get("results", [])
+        except (httpx.HTTPError, ValueError) as error:
+            log.warning("Tavily extract failed: %r", error)
+            return ""
+        return "\n\n".join(
+            raw for raw in (r.get("raw_content") or "" for r in results)
+            if raw
+        ).strip()
+
+    async def _tavily_search(self, url: str, api_key: str) -> list[str]:
         try:
             response = await self.client.post(
                 "https://api.tavily.com/search",
                 json={
-                    "api_key": self.settings.tavily_api_key.get_secret_value(),
-                    "query": f"{source.label} job posting",
+                    "api_key": api_key,
+                    "query": self._search_query(url),
                     "max_results": 5,
-                    "search_depth": "basic",
+                    "search_depth": "advanced",
                 },
                 timeout=self.settings.import_fetch_timeout,
             )
@@ -426,21 +461,34 @@ class LangGraphImporter:
             results = response.json().get("results", [])
         except (httpx.HTTPError, ValueError) as error:
             log.warning("Tavily search failed: %r", error)
-            warnings.append("Web search fallback failed.")
-            return {"warnings": warnings}
-        snippets = [
-            result.get("content", "")
-            for result in results
-            if result.get("content")
-        ]
-        combined = "\n\n".join(
-            [state["source_text"], *snippets]
-        ).strip()[: self.settings.import_max_chars]
-        if snippets:
+            return []
+        return [r["content"] for r in results if r.get("content")]
+
+    async def _search(self, state: ImportState) -> dict:
+        source = state["source"]
+        warnings = list(state["warnings"])
+        api_key = self.settings.tavily_api_key.get_secret_value()
+        parts = [state["source_text"]]
+
+        extracted = await self._tavily_extract(source.url or "", api_key)
+        if extracted:
+            parts.append(extracted)
             warnings.append(
-                "Fetched page was thin or blocked; "
-                "filled from web search results."
+                "Direct fetch was blocked; read via web extraction."
             )
+        else:
+            snippets = await self._tavily_search(source.url or "", api_key)
+            if snippets:
+                parts.extend(snippets)
+                warnings.append(
+                    "Fetched page was thin or blocked; "
+                    "filled from web search results."
+                )
+            else:
+                warnings.append("Web search fallback failed.")
+        combined = "\n\n".join(t for t in parts if t).strip()[
+            : self.settings.import_max_chars
+        ]
         return {"source_text": combined, "warnings": warnings}
 
     async def _extract(self, state: ImportState) -> dict:
@@ -493,6 +541,15 @@ class LangGraphImporter:
             raise ImportProviderError(
                 "Listing extraction returned unreadable data"
             ) from error
+        if not str(draft.get("title") or "").strip():
+            # The source wasn't one specific job ad (blocked page, search
+            # junk, category listing). Fail honestly rather than save a
+            # fabricated opening.
+            raise ListingNotReadable(
+                "Could not find a specific job listing at that source "
+                "(the site may block automated access). Try dropping a "
+                "PDF or screenshot of the ad instead."
+            )
         return {"draft": draft}
 
     async def _weights(self, state: ImportState) -> dict:

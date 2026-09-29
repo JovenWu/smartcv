@@ -123,6 +123,72 @@ async def test_thin_page_falls_back_to_tavily():
     await client.aclose()
 
 
+async def test_thin_page_uses_tavily_extract_first():
+    calls = []
+
+    def handler(request):
+        url = str(request.url)
+        calls.append(url)
+        if url.endswith("/extract"):
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "url": url,
+                            "raw_content": "Frontend Engineer at Acme. "
+                            "React, TypeScript. Jakarta. " * 40,
+                        }
+                    ],
+                    "failed_results": [],
+                },
+            )
+        if url.endswith("/search"):
+            return httpx.Response(200, json={"results": []})
+        if "openrouter" in url:
+            return openrouter_response(
+                {
+                    "title": "Frontend Engineer",
+                    "skills": ["React"],
+                    "criteria": [],
+                }
+            )
+        return httpx.Response(403, content=b"blocked")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    importer = LangGraphImporter(
+        make_settings(), FakeEvaluator(), client
+    )
+    draft = await importer.import_listing(
+        ImportSource.link("https://jobstreet.example/job/1")
+    )
+    assert draft.title == "Frontend Engineer"
+    assert any("extraction" in w.lower() for w in draft.warnings)
+    assert not any(c.endswith("/search") for c in calls)
+    await client.aclose()
+
+
+async def test_non_listing_page_is_rejected():
+    junk = b"<html><body>" + b"Browse all jobs. " * 80 + b"</body></html>"
+
+    def handler(request):
+        if "openrouter" in str(request.url):
+            return openrouter_response(
+                {"title": "", "skills": [], "criteria": []}
+            )
+        return httpx.Response(200, content=junk)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    importer = LangGraphImporter(
+        make_settings(), FakeEvaluator(), client
+    )
+    with pytest.raises(ListingNotReadable):
+        await importer.import_listing(
+            ImportSource.link("https://jobstreet.example/jobs")
+        )
+    await client.aclose()
+
+
 async def test_nothing_readable_raises():
     def handler(request):
         if "tavily" in str(request.url):
