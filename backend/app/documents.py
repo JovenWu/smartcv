@@ -41,22 +41,30 @@ class ParsedDocument:
     spans: list[EvidenceSpan]
 
 
-def parse_cv(path: Path, original_filename: str) -> ParsedDocument:
-    settings = get_settings()
+def validate_upload(
+    path: Path, original_filename: str, max_bytes: int
+) -> str:
+    """Check extension, size, and file signature. Returns the suffix."""
     suffix = Path(original_filename).suffix.lower()
     if suffix not in _ALLOWED_SUFFIXES:
         raise UnsupportedFile(
             f"Unsupported file type '{suffix or '(none)'}'; upload PDF or DOCX"
         )
-    if path.stat().st_size > settings.max_file_bytes:
-        raise UnsupportedFile(
-            f"File exceeds the {settings.max_file_bytes} byte limit"
-        )
+    if path.stat().st_size > max_bytes:
+        raise UnsupportedFile(f"File exceeds the {max_bytes} byte limit")
     if suffix == ".pdf":
         _require_pdf_signature(path)
-        preview_path = path
     else:
         _require_docx_structure(path)
+    return suffix
+
+
+def parse_cv(path: Path, original_filename: str) -> ParsedDocument:
+    settings = get_settings()
+    suffix = validate_upload(path, original_filename, settings.max_file_bytes)
+    if suffix == ".pdf":
+        preview_path = path
+    else:
         preview_path = _convert_docx_to_pdf(path, settings.previews_dir)
     return ParsedDocument(
         preview_path=preview_path, spans=extract_pdf_spans(preview_path)
