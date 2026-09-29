@@ -9,6 +9,7 @@ from backend.app.auth import SessionStore, auth_router
 from backend.app.config import Settings, get_settings
 from backend.app.database import SQLiteRepository
 from backend.app.events import EventHub, EventPublisher
+from backend.app.importer import create_importer
 from backend.app.typesafe_adapter import create_evaluator
 from backend.app.worker import CandidateWorkerPool
 
@@ -18,11 +19,16 @@ _LOCAL_ORIGINS = [
 ]
 
 
-def create_app(settings: Settings | None = None, evaluator=None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    evaluator=None,
+    importer=None,
+) -> FastAPI:
     settings = settings or get_settings()
     app = FastAPI(title="SmartCV")
     app.state.settings = settings
     app.state.evaluator_override = evaluator
+    app.state.importer_override = importer
     app.state.sessions = SessionStore()
 
     @asynccontextmanager
@@ -37,6 +43,16 @@ def create_app(settings: Settings | None = None, evaluator=None) -> FastAPI:
             active_evaluator, client = app.state.evaluator_override, None
         else:
             active_evaluator, client = create_evaluator(settings)
+        if app.state.importer_override is not None:
+            active_importer, import_client = (
+                app.state.importer_override,
+                None,
+            )
+        else:
+            active_importer, import_client = create_importer(
+                settings, active_evaluator
+            )
+        app.state.importer = active_importer
         hub = EventHub()
         publisher = EventPublisher(hub, repository)
         pool = CandidateWorkerPool(
@@ -57,6 +73,8 @@ def create_app(settings: Settings | None = None, evaluator=None) -> FastAPI:
             await pool.stop()
             if client is not None:
                 await client.aclose()
+            if import_client is not None:
+                await import_client.aclose()
             await repository.close()
 
     app.router.lifespan_context = lifespan
