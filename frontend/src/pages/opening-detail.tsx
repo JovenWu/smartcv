@@ -60,7 +60,7 @@ function MatchCell({ evaluation }: { evaluation?: CriterionEvaluation }) {
   }
   const meta = MATCH_META[evaluation.status]
   const Icon = meta.icon
-  return (
+  const cell = (
     <span
       className={cn(
         "inline-flex items-center gap-1.5 text-xs",
@@ -70,6 +70,22 @@ function MatchCell({ evaluation }: { evaluation?: CriterionEvaluation }) {
       <Icon className="size-3.5" />
       {meta.label}
     </span>
+  )
+  if (!evaluation.rationale) return cell
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span tabIndex={0} className="cursor-default">
+          {cell}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-64">
+        <p className="font-medium">
+          {meta.label} · {Math.round(evaluation.confidence * 100)}% confident
+        </p>
+        <p className="text-muted-foreground">{evaluation.rationale}</p>
+      </TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -128,7 +144,7 @@ export default function OpeningDetailPage() {
         <p className="text-xs text-destructive">{uploadError}</p>
       )}
 
-      <div className="min-w-0 flex-1">
+      <div className="min-h-0 min-w-0 flex-1">
           {candidates.length === 0 ? (
             <FileDropzone
               multiple
@@ -151,11 +167,11 @@ export default function OpeningDetailPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="sticky left-0 z-10 h-8 w-36 bg-background text-xs sm:w-44">
+                  <TableHead className="sticky left-0 top-0 z-20 h-8 w-36 bg-background text-xs sm:w-44">
                     Candidate
                   </TableHead>
                   {opening.criteria.map((c) => (
-                    <TableHead key={c.id} className="h-8 max-w-36 text-xs">
+                    <TableHead key={c.id} className="sticky top-0 z-10 h-8 max-w-36 bg-background text-xs">
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <span
@@ -176,7 +192,7 @@ export default function OpeningDetailPage() {
                       </Tooltip>
                     </TableHead>
                   ))}
-                  <TableHead className="sticky right-0 z-10 h-8 bg-background text-right text-xs">
+                  <TableHead className="sticky right-0 top-0 z-20 h-8 bg-background text-right text-xs">
                     Score
                   </TableHead>
                 </TableRow>
@@ -191,17 +207,30 @@ export default function OpeningDetailPage() {
                     className="group"
                   >
                     <TableCell className="sticky left-0 z-10 bg-background px-2 py-1.5 group-hover:bg-muted/50 group-data-[state=selected]:bg-muted">
-                      <div className="flex flex-col">
-                        <span className="truncate font-medium">
-                          {candidate.name}
-                        </span>
-                        <span className="truncate text-xs text-muted-foreground">
-                          {candidate.status === "failed" &&
-                          candidate.errorMessage
-                            ? candidate.errorMessage
-                            : `${candidate.file.filename} · ${STATUS_LABEL[candidate.status]}`}
-                        </span>
-                      </div>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <div tabIndex={0} className="flex flex-col">
+                            <span className="truncate font-medium">
+                              {candidate.name}
+                            </span>
+                            <span className="truncate text-xs text-muted-foreground">
+                              {candidate.status === "failed" &&
+                              candidate.errorMessage
+                                ? candidate.errorMessage
+                                : `${candidate.file.filename} · ${STATUS_LABEL[candidate.status]}`}
+                            </span>
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-64">
+                          <p className="font-medium">{candidate.name}</p>
+                          <p className="text-muted-foreground">
+                            {candidate.status === "failed" &&
+                            candidate.errorMessage
+                              ? candidate.errorMessage
+                              : `${candidate.file.filename} · ${STATUS_LABEL[candidate.status]}`}
+                          </p>
+                        </TooltipContent>
+                      </Tooltip>
                     </TableCell>
                     {opening.criteria.map((c) => (
                       <TableCell key={c.id} className="px-2 py-1.5">
