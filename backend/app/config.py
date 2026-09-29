@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     tavily_api_key: SecretStr | None = None
     smartcv_fake_importer: bool = False
     import_fetch_timeout: float = 15.0
+    # Headless-Chromium fallback for bot-protected listings (Jobstreet,
+    # LinkedIn). Slower than HTTP but runs the JS challenge a browser does.
+    import_browser_enabled: bool = True
+    import_browser_timeout: float = 60.0
     import_llm_timeout: float = 90.0
     import_max_chars: int = 40_000
     import_min_source_chars: int = 800

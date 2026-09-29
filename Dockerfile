@@ -14,7 +14,8 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY backend/requirements.txt backend/requirements.txt
-RUN pip install --no-cache-dir -r backend/requirements.txt
+RUN pip install --no-cache-dir -r backend/requirements.txt \
+    && playwright install --with-deps chromium
 
 COPY backend ./backend
 COPY pytest.ini ./pytest.ini

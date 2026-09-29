@@ -12,6 +12,7 @@ from backend.app.importer import (
     ImportSource,
     LangGraphImporter,
     ListingNotReadable,
+    _canonical_listing_url,
     create_importer,
 )
 from backend.app.typesafe_adapter import FakeEvaluator
@@ -52,6 +53,9 @@ def make_settings(**overrides):
         "_env_file": None,
         "openrouter_api_key": "k",
         "tavily_api_key": "k",
+        # Real browser launches stay out of unit tests; the browser tier
+        # is exercised via a stubbed _fetch_browser.
+        "import_browser_enabled": False,
     }
     base.update(overrides)
     return Settings(**base)
@@ -165,6 +169,55 @@ async def test_thin_page_uses_tavily_extract_first():
     assert draft.title == "Frontend Engineer"
     assert any("extraction" in w.lower() for w in draft.warnings)
     assert not any(c.endswith("/search") for c in calls)
+    await client.aclose()
+
+
+def test_search_page_url_canonicalized():
+    assert _canonical_listing_url(
+        "https://id.jobstreet.com/frontend-jobs?pos=1&jobId=94625401&type=standard"
+    ) == "https://id.jobstreet.com/job/94625401"
+    # Detail links and other hosts pass through untouched.
+    assert _canonical_listing_url(
+        "https://id.jobstreet.com/job/94625401"
+    ) == "https://id.jobstreet.com/job/94625401"
+    assert _canonical_listing_url(
+        "https://example.com/jobs?id=42"
+    ) == "https://example.com/jobs?id=42"
+
+
+async def test_blocked_page_uses_browser_render(monkeypatch):
+    async def fake_browser(self, url):
+        return "Frontend Engineer at Acme. React, TypeScript. " * 30
+
+    monkeypatch.setattr(
+        LangGraphImporter, "_fetch_browser", fake_browser
+    )
+
+    def handler(request):
+        url = str(request.url)
+        if "openrouter" in url:
+            return openrouter_response(
+                {
+                    "title": "Frontend Engineer",
+                    "skills": ["React"],
+                    "criteria": [],
+                }
+            )
+        if url.endswith("/search") or url.endswith("/extract"):
+            return httpx.Response(200, json={"results": []})
+        return httpx.Response(403, content=b"blocked")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    importer = LangGraphImporter(
+        make_settings(import_browser_enabled=True),
+        FakeEvaluator(),
+        client,
+    )
+    draft = await importer.import_listing(
+        ImportSource.link("https://jobstreet.example/job/1")
+    )
+    assert draft.title == "Frontend Engineer"
+    assert any("browser" in w.lower() for w in draft.warnings)
     await client.aclose()
 
 

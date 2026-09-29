@@ -39,6 +39,12 @@ _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "SmartCV/1.0 (+https://localhost)"
 )
+# Real-Chrome UA for the headless-browser tier — the bot challenge reads
+# it, so it must look like a normal desktop browser.
+_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _BLOCK_RE = re.compile(
@@ -233,6 +239,24 @@ def _slugify(value: str) -> str:
     return slug or uuid.uuid4().hex[:8]
 
 
+def _canonical_listing_url(url: str) -> str:
+    """Rewrite search-page links carrying a job id to the listing
+    permalink. Jobstreet/SEEK share links look like
+    `…/frontend-jobs?jobId=94625401`; the fetchable page is `/job/<id>`.
+    """
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    params = parse_qs(parsed.query)
+    job_ids = params.get("jobId") or params.get("job_id")
+    if (
+        job_ids
+        and job_ids[0].isdigit()
+        and ("jobstreet" in host or "seek.com" in host)
+    ):
+        return f"{parsed.scheme}://{host}/job/{job_ids[0]}"
+    return url
+
+
 class LangGraphImporter:
     """Real importer: fetch/search -> gpt-6-luna extraction -> Jev weights."""
 
@@ -291,8 +315,21 @@ class LangGraphImporter:
     async def _gather(self, state: ImportState) -> dict:
         source = state["source"]
         if source.kind == "link":
-            text = await self._fetch_link(source.url)
-            return {"source_text": text}
+            url = _canonical_listing_url(source.url)
+            text = await self._fetch_link(url)
+            warnings: list[str] = []
+            if (
+                len(text) < self.settings.import_min_source_chars
+                and self.settings.import_browser_enabled
+            ):
+                rendered = await self._fetch_browser(url)
+                if len(rendered) > len(text):
+                    text = rendered
+                    warnings.append(
+                        "Direct fetch was blocked; rendered the page in a "
+                        "headless browser."
+                    )
+            return {"source_text": text, "warnings": warnings}
         path = source.path
         assert path is not None
         suffix = path.suffix.lower()
@@ -398,6 +435,61 @@ class LangGraphImporter:
         text = body.decode("utf-8", errors="replace")
         return _html_to_text(text)[: self.settings.import_max_chars]
 
+    async def _fetch_browser(self, url: str) -> str:
+        """Render the page in headless Chromium.
+
+        Bot-protected boards (Jobstreet, LinkedIn) answer plain HTTP with a
+        Cloudflare challenge; a real browser executes it and reads the
+        rendered listing. Slower and heavier, so it only runs when the
+        direct fetch came back thin.
+        """
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            log.warning("playwright unavailable; skipping browser fetch")
+            return ""
+        self._check_url(url)
+        timeout_ms = int(self.settings.import_browser_timeout * 1000)
+        try:
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(
+                    headless=True,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                try:
+                    context = await browser.new_context(
+                        user_agent=_CHROME_UA,
+                        viewport={"width": 1440, "height": 900},
+                    )
+                    await context.add_init_script(
+                        "Object.defineProperty(navigator, 'webdriver',"
+                        " {get: () => undefined})"
+                    )
+                    page = await context.new_page()
+                    await page.goto(
+                        url,
+                        wait_until="domcontentloaded",
+                        timeout=timeout_ms,
+                    )
+                    # Bot-check interstitials ("Just a moment…", security
+                    # verification) auto-resolve after their JS runs; poll
+                    # the title until the real page appears.
+                    remaining = timeout_ms
+                    while remaining > 0:
+                        title = (await page.title()).lower()
+                        if "moment" not in title and "verif" not in title:
+                            break
+                        await page.wait_for_timeout(2000)
+                        remaining -= 2000
+                    self._check_url(page.url)
+                    text = await page.evaluate("document.body.innerText")
+                finally:
+                    await browser.close()
+        except Exception as error:
+            log.warning("Browser fetch failed for %s: %r", url, error)
+            return ""
+        return str(text or "")[: self.settings.import_max_chars]
+
     def _needs_search(self, state: ImportState) -> str:
         # Web search only helps links (blocked/JS-heavy boards); file
         # uploads are read directly by the model.
@@ -470,14 +562,15 @@ class LangGraphImporter:
         api_key = self.settings.tavily_api_key.get_secret_value()
         parts = [state["source_text"]]
 
-        extracted = await self._tavily_extract(source.url or "", api_key)
+        url = _canonical_listing_url(source.url or "")
+        extracted = await self._tavily_extract(url, api_key)
         if extracted:
             parts.append(extracted)
             warnings.append(
                 "Direct fetch was blocked; read via web extraction."
             )
         else:
-            snippets = await self._tavily_search(source.url or "", api_key)
+            snippets = await self._tavily_search(url, api_key)
             if snippets:
                 parts.extend(snippets)
                 warnings.append(
