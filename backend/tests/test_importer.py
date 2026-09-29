@@ -205,6 +205,45 @@ async def test_image_import_sends_image_part(tmp_path):
     await client.aclose()
 
 
+async def test_private_link_is_rejected():
+    def handler(request):
+        return httpx.Response(200, content=LISTING_HTML)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    importer = LangGraphImporter(
+        make_settings(), FakeEvaluator(), client
+    )
+    with pytest.raises(ListingNotReadable):
+        await importer.import_listing(
+            ImportSource.link("http://127.0.0.1:8000/job/1")
+        )
+    with pytest.raises(ListingNotReadable):
+        await importer.import_listing(
+            ImportSource.link("file:///etc/passwd")
+        )
+    await client.aclose()
+
+
+async def test_redirect_to_private_host_is_rejected():
+    def handler(request):
+        url = str(request.url)
+        if "public.example" in url:
+            return httpx.Response(
+                302, headers={"location": "http://169.254.169.254/latest"}
+            )
+        return httpx.Response(200, content=LISTING_HTML)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    importer = LangGraphImporter(
+        make_settings(), FakeEvaluator(), client
+    )
+    with pytest.raises(ListingNotReadable):
+        await importer.import_listing(
+            ImportSource.link("https://public.example/job/1")
+        )
+    await client.aclose()
+
+
 async def test_import_source_kind_and_labels():
     link = ImportSource.link("https://x.example/job")
     assert link.kind == "link"

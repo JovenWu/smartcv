@@ -56,17 +56,23 @@ function onEvent(openingId: string, event: string, data: unknown) {
     case "opening.complete": {
       const candidates = payload.candidates as Candidate[] | undefined
       if (candidates) setList(openingId, candidates)
-      void refreshOpenings()
+      void refreshOpenings().catch(() => {})
+      // Terminal stream — EventSource would otherwise auto-reconnect and
+      // the server would replay the snapshot in a poll loop.
+      const opening = payload.opening as { isFinal?: boolean } | undefined
+      if (event === "opening.complete" || opening?.isFinal) {
+        caches.get(openingId)?.events?.close()
+      }
       break
     }
     case "candidate.updated": {
       const candidate = payload.candidate as Candidate | undefined
       if (candidate) upsert(openingId, candidate)
-      void refreshOpenings()
+      void refreshOpenings().catch(() => {})
       break
     }
     case "opening.progress":
-      void refreshOpenings()
+      void refreshOpenings().catch(() => {})
       break
   }
 }
@@ -199,13 +205,6 @@ export async function retryCandidate(
   )
   upsert(openingId, updated)
   return updated
-}
-
-export function candidateFileUrl(
-  openingId: string,
-  candidateId: string,
-): string {
-  return `/api/openings/${openingId}/candidates/${candidateId}/preview`
 }
 
 /** Test hook — clears caches and closes any open streams. */

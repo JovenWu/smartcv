@@ -203,10 +203,10 @@ def test_demo_batch_generation(tmp_path, monkeypatch):
     monkeypatch.setattr(generator, "OUTPUT_DIR", tmp_path / "demo")
     generator.main()
     output = tmp_path / "demo"
-    assert (output / "job.json").exists()
+    assert (output / "opening.json").exists()
     files = list(output.iterdir())
     pdfs = [f for f in files if f.suffix == ".pdf"]
     docxs = [f for f in files if f.suffix == ".docx"]
-    assert len(files) == 26  # 25 CVs + job.json
+    assert len(files) == 26  # 25 CVs + opening.json
     assert len(pdfs) == 15
     assert len(docxs) == 10

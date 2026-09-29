@@ -8,6 +8,7 @@ extraction -> Jev weight suggestions. Produces a reviewer-editable
 
 import base64
 import html
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -16,6 +17,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from langgraph.graph import END, START, StateGraph
@@ -46,6 +48,11 @@ _BLOCK_RE = re.compile(
 _WS_RE = re.compile(r"\s+")
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+# Link fetches are capped and never touch private/loopback hosts — the URL
+# comes from user input and its content is returned to the caller.
+_MAX_FETCH_BYTES = 2 * 1024 * 1024
+_MAX_REDIRECTS = 5
 
 OPENING_DRAFT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -238,7 +245,12 @@ class LangGraphImporter:
                 "draft": None,
             }
         )
-        return self._to_draft(source, state)
+        try:
+            return self._to_draft(source, state)
+        except ValueError as error:
+            raise ImportProviderError(
+                "Listing extraction returned unreadable data"
+            ) from error
 
     # ---------- graph nodes ----------
 
@@ -304,22 +316,70 @@ class LangGraphImporter:
             f"Unsupported listing file '{source.filename}'"
         )
 
-    async def _fetch_link(self, url: str) -> str:
+    @staticmethod
+    def _check_url(url: str) -> None:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ListingNotReadable("Only http(s) links can be imported.")
+        host = (parsed.hostname or "").lower()
+        if not host or "." not in host:
+            raise ListingNotReadable("Link has no public host.")
+        if host == "localhost" or host.endswith(
+            (".localhost", ".local", ".internal", ".lan")
+        ):
+            raise ListingNotReadable("Link points to a local host.")
         try:
-            response = await self.client.get(
-                url,
-                headers={"User-Agent": _BROWSER_UA},
-                follow_redirects=True,
-                timeout=self.settings.import_fetch_timeout,
-            )
-        except httpx.HTTPError:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is not None and (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_unspecified
+            or address.is_multicast
+        ):
+            raise ListingNotReadable("Link points to a non-public address.")
+
+    async def _fetch_link(self, url: str) -> str:
+        current = url
+        body: bytes | None = None
+        for _ in range(_MAX_REDIRECTS + 1):
+            self._check_url(current)
+            try:
+                async with self.client.stream(
+                    "GET",
+                    current,
+                    headers={"User-Agent": _BROWSER_UA},
+                    timeout=self.settings.import_fetch_timeout,
+                ) as response:
+                    if response.is_redirect:
+                        location = response.headers.get("location")
+                        if not location:
+                            return ""
+                        current = urljoin(current, location)
+                        continue  # re-validated at loop top
+                    if response.status_code >= 400:
+                        return ""
+                    content_type = response.headers.get("content-type", "")
+                    if "pdf" in content_type:
+                        return ""
+                    chunks: list[bytes] = []
+                    size = 0
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > _MAX_FETCH_BYTES:
+                            break
+                        chunks.append(chunk)
+                    body = b"".join(chunks)[:_MAX_FETCH_BYTES]
+            except httpx.HTTPError:
+                return ""
+            break
+        if body is None:
             return ""
-        if response.status_code >= 400:
-            return ""
-        content_type = response.headers.get("content-type", "")
-        if "pdf" in content_type:
-            return ""
-        return _html_to_text(response.text)[: self.settings.import_max_chars]
+        text = body.decode("utf-8", errors="replace")
+        return _html_to_text(text)[: self.settings.import_max_chars]
 
     def _needs_search(self, state: ImportState) -> str:
         # Web search only helps links (blocked/JS-heavy boards); file

@@ -1,10 +1,14 @@
 # SmartCV
 
-Demo-only CV screening workflow. A FastAPI backend parses PDF/DOCX CVs into
-page-linked evidence spans, asks Jev (TypeSafe System One) for per-criterion
-judgments, computes a transparent weighted score in code, and streams each
-completed scorecard over SSE. The recruiter always makes shortlist decisions;
-the system never rejects or contacts candidates.
+Demo-only CV screening workflow. Recruiters create **openings** — manually or
+by importing a listing from a job board link or a dropped file — then upload
+PDF/DOCX CVs. A FastAPI backend parses each CV into page-linked evidence
+spans, asks Jev (TypeSafe System One) for per-criterion judgments, computes a
+transparent weighted score in code, and streams each completed scorecard over
+SSE. A LangGraph import agent (OpenRouter `openai/gpt-6-luna`, optional Tavily
+web-search fallback) extracts role details and criteria from listings for
+reviewer confirmation. The recruiter always makes shortlist decisions; the
+system never rejects or contacts candidates.
 
 **Demo scope:** synthetic or rigorously de-identified CVs only. No real
 applicant data, no OCR, no automatic rejection.
@@ -32,6 +36,25 @@ SMARTCV_FAKE_EVALUATOR=false TYPESAFE_API_KEY=<key> docker compose up --build
 ```
 
 Provider failures never fall back to fake scoring silently.
+
+### Listing import (optional)
+
+The "Import a listing" flow (paste a Jobstreet/LinkedIn/Glints link or drop a
+PDF, DOCX, or image of the ad) needs an OpenRouter key; Tavily adds a
+web-search fallback for blocked or thin pages:
+
+```bash
+OPENROUTER_API_KEY=<key> TAVILY_API_KEY=<key> docker compose up --build
+```
+
+`OPENROUTER_MODEL` defaults to `openai/gpt-6-luna`. Without keys the import
+endpoints return 503; set `SMARTCV_FAKE_IMPORTER=true` for a deterministic
+offline stub. The draft is never persisted — the reviewer confirms it in the
+review form first. API keys stay server-side.
+
+While typing skills in the manual form, the UI debounces ~600ms then asks
+`POST /api/criteria-suggestions` for Jev classifications — matching existing
+criteria or proposing new weighted ones.
 
 ### Demo gate (optional)
 
@@ -93,23 +116,35 @@ backend/.venv/Scripts/python -m pytest backend/tests -q
 backend/.venv/Scripts/python backend/scripts/generate_demo_batch.py
 ```
 
-Writes 25 synthetic PDF/DOCX/corrupt CVs plus a `job.json` under the ignored
-`backend/data/demo/` directory. Upload them through
-`POST /api/jobs/{job_id}/cvs` after creating a job from `job.json`.
+Writes 25 synthetic PDF/DOCX/corrupt CVs plus an `opening.json` under the
+ignored `backend/data/demo/` directory. Create the opening via
+`POST /api/openings` with that body, then upload the CVs through
+`POST /api/openings/{id}/candidates`.
 
 ## API overview
 
+- `GET/POST /api/openings` — list / create openings (criteria carry
+  recruiter-confirmed weights plus `suggestedWeight`/`suggestionConfidence`)
+- `GET/PATCH /api/openings/{id}` — detail / edit an opening
+- `POST /api/openings/import/link` — extract a listing draft from a URL
+  (503 without `OPENROUTER_API_KEY`/`SMARTCV_FAKE_IMPORTER`)
+- `POST /api/openings/import/file` — extract a listing draft from a
+  PDF/DOCX/image upload (multipart `file`)
+- `POST /api/criteria-suggestions` — debounced skill → criterion
+  classification (matched criterion or a new weighted suggestion)
 - `POST /api/weight-suggestions` — Jev weight suggestions (recruiter confirms)
-- `POST /api/jobs` — create a job with confirmed criteria/weights
-- `POST /api/jobs/{id}/cvs` — multipart batch upload (≤200 files)
-- `GET /api/jobs/{id}` — snapshot of job, candidates, scores
-- `GET /api/jobs/{id}/events` — SSE: `snapshot`, `candidate.updated`,
-  `job.progress`, `job.complete`
-- `GET /api/jobs/{id}/candidates/{cid}/preview` — normalized PDF preview
-- `GET /api/jobs/{id}/candidates/{cid}/spans` — extracted evidence spans
-- `PATCH /api/jobs/{id}/candidates/{cid}/criteria/{criterion_id}` — manual
+- `POST /api/openings/{id}/candidates` — multipart CV batch (≤200 files,
+  PDF/DOCX only)
+- `GET /api/openings/{id}/candidates` — candidate list for one opening
+- `GET /api/openings/{id}/events` — SSE: `snapshot`, `candidate.updated`,
+  `opening.progress`, `opening.complete`
+- `GET /api/openings/{id}/candidates/{cid}/preview` — normalized PDF preview
+- `GET /api/openings/{id}/candidates/{cid}/spans` — extracted evidence spans
+- `PATCH /api/openings/{id}/candidates/{cid}/criteria/{criterion_id}` — manual
   review override (`not_found`/`partial`/`strong` + note)
-- `POST /api/jobs/{id}/candidates/{cid}/retry` — retry a retryable failure
+- `PATCH /api/openings/{id}/candidates/{cid}/decision` — recruiter decision
+  (`undecided`/`shortlisted`/`passed`)
+- `POST /api/openings/{id}/candidates/{cid}/retry` — retry a retryable failure
 
 ## Notes
 

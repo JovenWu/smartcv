@@ -20,3 +20,4 @@ frontend/dist/
 # Misc
 .worktrees/
 .DS_Store
+%TEMP%*.json

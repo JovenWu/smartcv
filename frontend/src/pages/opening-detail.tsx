@@ -86,6 +86,7 @@ export default function OpeningDetailPage() {
   const opening = useOpenings().find((o) => o.id === id)
   const candidates = useCandidates(id)
   const [addOpen, setAddOpen] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
   const { selected, openCv } = useCvViewer()
 
   if (!opening) {
@@ -118,6 +119,9 @@ export default function OpeningDetailPage() {
           Add CVs
         </Button>
       </div>
+      {uploadError && (
+        <p className="text-xs text-destructive">{uploadError}</p>
+      )}
 
       <div className="min-w-0 flex-1">
           {candidates.length === 0 ? (
@@ -127,7 +131,16 @@ export default function OpeningDetailPage() {
               className="h-full justify-center"
               title="No candidates yet — drop CVs here"
               hint="PDF or DOCX · multiple files · or click to browse a batch"
-              onFiles={(files) => void addCandidates(opening.id, files)}
+              onFiles={(files) => {
+                setUploadError(null)
+                addCandidates(opening.id, files).catch((err) =>
+                  setUploadError(
+                    err instanceof Error
+                      ? err.message
+                      : "Could not upload the batch.",
+                  ),
+                )
+              }}
             />
           ) : (
             <Table>

@@ -58,6 +58,7 @@ export function ManualOpeningForm({
   const [educationLevel, setEducationLevel] = useState(
     initial?.educationLevel ?? "",
   )
+  const [closesAt, setClosesAt] = useState(initial?.closesAt ?? "")
   const [skills, setSkills] = useState(initial?.skills?.join(", ") ?? "")
   const [description, setDescription] = useState(initial?.description ?? "")
   const [criteria, setCriteria] = useState<NewCriterionInput[]>(
@@ -162,6 +163,8 @@ export function ManualOpeningForm({
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean),
+        closesAt: closesAt || undefined,
+        source: initial?.source,
         criteria,
       })
       onDone()
@@ -267,6 +270,15 @@ export function ManualOpeningForm({
               placeholder="e.g. Bachelor's degree"
               value={educationLevel}
               onChange={(e) => setEducationLevel(e.target.value)}
+            />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="opening-closes-at">Closes on</FieldLabel>
+            <Input
+              id="opening-closes-at"
+              type="date"
+              value={closesAt}
+              onChange={(e) => setClosesAt(e.target.value)}
             />
           </Field>
         </div>

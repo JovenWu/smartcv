@@ -225,51 +225,61 @@ class SQLiteRepository:
         return {row["name"] for row in await cursor.fetchall()}
 
     async def _migrate(self) -> None:
-        """Bring a legacy jobs-based database up to the openings schema."""
-        tables = await self._table_names()
-        if "jobs" in tables:
-            await self.db.execute(
-                "INSERT INTO openings (id, title, is_final, created_at) "
-                "SELECT id, title, is_final, "
-                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now') FROM jobs"
-            )
-            await self.db.execute("DROP TABLE jobs")
-        for table in ("criteria", "candidates"):
-            columns = await self._columns(table)
-            if "job_id" in columns and "opening_id" not in columns:
+        """Bring a legacy jobs-based database up to the openings schema.
+
+        Runs inside a transaction so a mid-migration crash cannot leave a
+        half-migrated database.
+        """
+        await self.db.execute("BEGIN")
+        try:
+            tables = await self._table_names()
+            if "jobs" in tables:
                 await self.db.execute(
-                    f"ALTER TABLE {table} RENAME COLUMN job_id TO opening_id"
+                    "INSERT INTO openings (id, title, is_final, created_at) "
+                    "SELECT id, title, is_final, "
+                    "strftime('%Y-%m-%dT%H:%M:%fZ', 'now') FROM jobs"
                 )
-        for table, additions in (
-            ("openings", _OPENING_COLUMNS),
-            ("criteria", _CRITERIA_COLUMNS),
-            ("candidates", _CANDIDATE_COLUMNS),
-            ("evaluations", _EVALUATION_COLUMNS),
-            ("evidence_spans", _SPAN_COLUMNS),
-        ):
-            if table not in await self._table_names():
-                continue
-            existing = await self._columns(table)
-            for name, ddl in additions:
-                if name not in existing:
+                await self.db.execute("DROP TABLE jobs")
+            for table in ("criteria", "candidates"):
+                columns = await self._columns(table)
+                if "job_id" in columns and "opening_id" not in columns:
                     await self.db.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"
+                        f"ALTER TABLE {table} RENAME COLUMN job_id "
+                        "TO opening_id"
                     )
-        eval_columns = await self._columns("evaluations")
-        if (
-            "evidence_span_id" in eval_columns
-            and "evidence_span_ids" not in eval_columns
-        ):
-            await self.db.execute(
-                "ALTER TABLE evaluations RENAME COLUMN evidence_span_id "
-                "TO evidence_span_ids"
-            )
-            await self.db.execute(
-                "UPDATE evaluations SET evidence_span_ids = "
-                "'[\"' || evidence_span_ids || '\"]' "
-                "WHERE evidence_span_ids IS NOT NULL "
-                "AND substr(evidence_span_ids, 1, 1) <> '['"
-            )
+            for table, additions in (
+                ("openings", _OPENING_COLUMNS),
+                ("criteria", _CRITERIA_COLUMNS),
+                ("candidates", _CANDIDATE_COLUMNS),
+                ("evaluations", _EVALUATION_COLUMNS),
+                ("evidence_spans", _SPAN_COLUMNS),
+            ):
+                if table not in await self._table_names():
+                    continue
+                existing = await self._columns(table)
+                for name, ddl in additions:
+                    if name not in existing:
+                        await self.db.execute(
+                            f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"
+                        )
+            eval_columns = await self._columns("evaluations")
+            if (
+                "evidence_span_id" in eval_columns
+                and "evidence_span_ids" not in eval_columns
+            ):
+                await self.db.execute(
+                    "ALTER TABLE evaluations RENAME COLUMN evidence_span_id "
+                    "TO evidence_span_ids"
+                )
+                await self.db.execute(
+                    "UPDATE evaluations SET evidence_span_ids = "
+                    "'[\"' || evidence_span_ids || '\"]' "
+                    "WHERE evidence_span_ids IS NOT NULL "
+                    "AND substr(evidence_span_ids, 1, 1) <> '['"
+                )
+        except Exception:
+            await self.db.rollback()
+            raise
 
     # ---------- openings ----------
 

@@ -61,7 +61,7 @@ def write_docx(path: Path, text: str) -> None:
 
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    (OUTPUT_DIR / "job.json").write_text(
+    (OUTPUT_DIR / "opening.json").write_text(
         json.dumps(DEMO_JOB, indent=2), encoding="utf-8"
     )
     for index in range(25):

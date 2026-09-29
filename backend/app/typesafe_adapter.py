@@ -99,57 +99,6 @@ class TypeSafeEvaluator:
             for criterion in criteria
         ]
 
-    async def evaluate_candidate(
-        self, criteria: list[Criterion], spans: list[EvidenceSpan]
-    ) -> list[CriterionEvaluation]:
-        evaluation_spans = prepare_evaluation_spans(spans)
-        questions = {}
-        for criterion in criteria:
-            questions[f"score_{criterion.id}"] = Score(
-                instructions=(
-                    f"How strongly does the CV evidence meet this requirement: "
-                    f"{criterion.name} — {criterion.description}. Assess only "
-                    f"job-related evidence and ignore personal identity or "
-                    f"demographic characteristics."
-                ),
-                criteria=list(_MATCH_LEVELS),
-            )
-            questions[f"evidence_{criterion.id}"] = Choice(
-                instructions=(
-                    f"Which span best supports this requirement: "
-                    f"{criterion.name} — {criterion.description}. Choose "
-                    f"{NO_MATCH} if none does."
-                ),
-                criteria={
-                    **{
-                        span.id: f"Page {span.page_number}: {span.text}"
-                        for span in evaluation_spans
-                    },
-                    NO_MATCH: "No listed span supports the requirement.",
-                },
-            )
-        try:
-            result = await self.client.system_one(
-                state={
-                    "criteria": [
-                        {
-                            "id": criterion.id,
-                            "name": criterion.name,
-                            "description": criterion.description,
-                        }
-                        for criterion in criteria
-                    ],
-                    "spans": [
-                        span.model_dump(mode="json") for span in evaluation_spans
-                    ],
-                },
-                questions=questions,
-            )
-        except Exception as error:
-            raise RetryableEvaluationError(
-                f"Evaluation service request failed ({type(error).__name__})"
-            ) from error
-
     async def suggest_criteria(
         self, request: CriteriaSuggestionRequest
     ) -> list[SkillSuggestion]:
@@ -223,7 +172,7 @@ class TypeSafeEvaluator:
             required_probability = min(
                 1.0, max(0.0, required_answer.noul)
             )
-            required = required_probability >= 0.5
+            required = required_probability >= 0.6
             confidence = min(
                 match_answer.confidence,
                 score_answer.confidence,

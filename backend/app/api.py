@@ -69,8 +69,13 @@ async def _store_upload(
 async def suggest_weights(
     body: WeightSuggestionRequest, request: Request
 ) -> WeightSuggestionResponse:
+    from backend.app.typesafe_adapter import RetryableEvaluationError
+
     evaluator = request.app.state.evaluator
-    suggestions = await evaluator.suggest_weights(body.criteria)
+    try:
+        suggestions = await evaluator.suggest_weights(body.criteria)
+    except RetryableEvaluationError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
     return WeightSuggestionResponse(suggestions=suggestions)
 
 
@@ -78,8 +83,13 @@ async def suggest_weights(
 async def suggest_criteria(
     body: CriteriaSuggestionRequest, request: Request
 ) -> CriteriaSuggestionResponse:
+    from backend.app.typesafe_adapter import RetryableEvaluationError
+
     evaluator = request.app.state.evaluator
-    suggestions = await evaluator.suggest_criteria(body)
+    try:
+        suggestions = await evaluator.suggest_criteria(body)
+    except RetryableEvaluationError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
     return CriteriaSuggestionResponse(suggestions=suggestions)
 
 
@@ -239,6 +249,7 @@ async def upload_candidates(
             validate_upload(stored_path, filename, settings.max_file_bytes)
         except UnsupportedFile as exc:
             error = str(exc)
+            stored_path.unlink(missing_ok=True)
         await repository.add_candidates(
             opening_id,
             [
