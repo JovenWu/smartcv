@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+backend/.venv/
+.pytest_cache/
+
+# Local configuration and secrets
+backend/.env
+.env
+
+# Runtime data (uploaded CVs, normalized previews, SQLite DB, demo batch)
+backend/data/
+*.sqlite3
+*.sqlite3-journal
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Misc
+.worktrees/
+.DS_Store
