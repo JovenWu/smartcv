@@ -1,6 +1,13 @@
+import { useState } from "react"
 import { Link, useLocation } from "react-router-dom"
+import { PlusIcon, RotateCcwIcon } from "lucide-react"
 
-import type { Opening } from "@/lib/openings"
+import { NewOpeningDialog } from "@/components/new-opening-dialog"
+import {
+  refreshOpenings,
+  useOpeningsStatus,
+  type Opening,
+} from "@/lib/openings"
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -9,10 +16,13 @@ import {
   SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSkeleton,
 } from "@/components/ui/sidebar"
 
 export function NavOpenings({ items }: { items: Opening[] }) {
   const location = useLocation()
+  const status = useOpeningsStatus()
+  const [newOpeningOpen, setNewOpeningOpen] = useState(false)
 
   return (
     <SidebarGroup>
@@ -26,26 +36,64 @@ export function NavOpenings({ items }: { items: Opening[] }) {
       </SidebarGroupLabel>
       <SidebarGroupContent>
         <SidebarMenu>
-          {items.map((item) => (
-            <SidebarMenuItem key={item.id}>
+          {status === "loading" && (
+            <>
+              <SidebarMenuSkeleton showIcon />
+              <SidebarMenuSkeleton showIcon />
+            </>
+          )}
+          {status === "error" && (
+            <SidebarMenuItem>
               <SidebarMenuButton
-                asChild
-                isActive={location.pathname === item.url}
+                onClick={() => refreshOpenings().catch(() => {})}
+                className="border border-dashed text-muted-foreground"
               >
-                <Link to={item.url}>
-                  {item.icon}
-                  <span>{item.title}</span>
-                </Link>
+                <RotateCcwIcon />
+                <span>Retry loading</span>
               </SidebarMenuButton>
-              {item.pendingReview > 0 && (
-                <SidebarMenuBadge className="rounded-full bg-muted">
-                  {item.pendingReview}
-                </SidebarMenuBadge>
-              )}
             </SidebarMenuItem>
-          ))}
+          )}
+          {status === "ready" && items.length === 0 && (
+            <>
+              <p className="px-2 pb-1 text-xs text-muted-foreground">
+                No openings yet
+              </p>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  onClick={() => setNewOpeningOpen(true)}
+                  className="border border-dashed text-muted-foreground hover:text-sidebar-foreground"
+                >
+                  <PlusIcon />
+                  <span>New opening</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </>
+          )}
+          {status === "ready" &&
+            items.map((item) => (
+              <SidebarMenuItem key={item.id}>
+                <SidebarMenuButton
+                  asChild
+                  isActive={location.pathname === item.url}
+                >
+                  <Link to={item.url}>
+                    {item.icon}
+                    <span>{item.title}</span>
+                  </Link>
+                </SidebarMenuButton>
+                {item.pendingReview > 0 && (
+                  <SidebarMenuBadge className="rounded-full bg-muted">
+                    {item.pendingReview}
+                  </SidebarMenuBadge>
+                )}
+              </SidebarMenuItem>
+            ))}
         </SidebarMenu>
       </SidebarGroupContent>
+      <NewOpeningDialog
+        open={newOpeningOpen}
+        onOpenChange={setNewOpeningOpen}
+      />
     </SidebarGroup>
   )
 }

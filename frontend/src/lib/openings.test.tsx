@@ -6,6 +6,7 @@ import {
   mergeSuggestions,
   updateOpening,
   useOpenings,
+  useOpeningsStatus,
   __resetOpeningsForTests,
 } from "@/lib/openings"
 
@@ -41,6 +42,29 @@ describe("useOpenings", () => {
     await waitFor(() => expect(result.current).toHaveLength(1))
     expect(fetchMock.mock.calls[0][0]).toBe("/api/openings")
     expect(result.current[0].url).toBe("/openings/x")
+  })
+})
+
+describe("useOpeningsStatus", () => {
+  it("is loading until the first fetch resolves", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify([OPENING]), { status: 200 }),
+      ),
+    )
+    const { result } = renderHook(() => useOpeningsStatus())
+    expect(result.current).toBe("loading")
+    await waitFor(() => expect(result.current).toBe("ready"))
+  })
+
+  it("reports error when the list fetch fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("nope", { status: 500 })),
+    )
+    const { result } = renderHook(() => useOpeningsStatus())
+    await waitFor(() => expect(result.current).toBe("error"))
   })
 })
 

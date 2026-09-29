@@ -87,6 +87,7 @@ export interface NewOpeningInput {
 
 let openings: Opening[] = []
 let loaded = false
+let loadError: string | null = null
 let inflight: Promise<void> | null = null
 
 const listeners = new Set<() => void>()
@@ -97,7 +98,7 @@ function emit() {
 
 function subscribe(callback: () => void) {
   listeners.add(callback)
-  if (!loaded) void refreshOpenings()
+  if (!loaded) refreshOpenings().catch(() => {})
   return () => {
     listeners.delete(callback)
   }
@@ -105,6 +106,14 @@ function subscribe(callback: () => void) {
 
 export function useOpenings(): Opening[] {
   return useSyncExternalStore(subscribe, () => openings)
+}
+
+export type OpeningsStatus = "loading" | "ready" | "error"
+
+export function useOpeningsStatus(): OpeningsStatus {
+  return useSyncExternalStore(subscribe, () =>
+    loaded ? "ready" : loadError ? "error" : "loading",
+  )
 }
 
 export function getOpening(id: string | undefined): Opening | undefined {
@@ -139,7 +148,14 @@ export async function refreshOpenings(): Promise<void> {
     .then((list) => {
       openings = list.map(decorate)
       loaded = true
+      loadError = null
       emit()
+    })
+    .catch((err: unknown) => {
+      loadError =
+        err instanceof Error ? err.message : "Could not load openings."
+      emit()
+      throw err
     })
     .finally(() => {
       inflight = null
@@ -242,5 +258,6 @@ export function mergeSuggestions(
 export function __resetOpeningsForTests() {
   openings = []
   loaded = false
+  loadError = null
   inflight = null
 }
