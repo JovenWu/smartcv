@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     )
 
     typesafe_api_key: SecretStr | None = None
-    typesafe_model: str = "jev"
+    typesafe_model: str = "jev-latest"
     smartcv_fake_evaluator: bool = False
     # Listing import agent (LangGraph + OpenRouter). Optional: endpoints
     # return 503 when neither a key nor the fake importer is configured.

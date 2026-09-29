@@ -22,7 +22,7 @@ COPY pytest.ini ./pytest.ini
 
 # Runtime files live under /app/backend/data (mount a volume to persist).
 ENV SMARTCV_FAKE_EVALUATOR=false \
-    TYPESAFE_MODEL=jev
+    TYPESAFE_MODEL=jev-latest
 
 EXPOSE 8000
 
