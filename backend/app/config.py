@@ -2,7 +2,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -38,7 +38,14 @@ class Settings(BaseSettings):
     worker_count: int = Field(default=4, ge=1)
     review_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     data_dir: Path = DEFAULT_DATA_DIR
-    database_path: Path = DEFAULT_DATA_DIR / "smartcv.sqlite3"
+    # When unset, derived from data_dir so a custom data_dir stays isolated.
+    database_path: Path | None = None
+
+    @model_validator(mode="after")
+    def _default_database_path(self):
+        if self.database_path is None:
+            self.database_path = self.data_dir / "smartcv.sqlite3"
+        return self
 
     @property
     def demo_accounts(self) -> dict[str, str]:

@@ -1,7 +1,7 @@
 from collections.abc import Mapping, Sequence
 
 from backend.app.schemas import (
-    CandidateResult,
+    Candidate,
     CandidateStatus,
     CriterionEvaluation,
     MatchStatus,
@@ -48,8 +48,8 @@ def calculate_total_score(
 
 
 def rank_candidates(
-    candidates: Sequence[CandidateResult],
-) -> list[CandidateResult]:
+    candidates: Sequence[Candidate],
+) -> list[Candidate]:
     rankable = [
         candidate
         for candidate in candidates
@@ -57,7 +57,7 @@ def rank_candidates(
         and candidate.status in RANKABLE_STATUSES
     ]
 
-    def ranking_key(candidate: CandidateResult) -> tuple[float, int]:
+    def ranking_key(candidate: Candidate) -> tuple[float, int]:
         assert candidate.total_score is not None
         return (-candidate.total_score, candidate.upload_order)
 

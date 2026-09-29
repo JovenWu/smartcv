@@ -6,42 +6,44 @@ from typing import Any
 
 
 @dataclass(frozen=True)
-class JobEvent:
+class OpeningEvent:
     name: str
     payload: dict[str, Any]
 
 
 class _Subscriber:
-    def __init__(self, queue: asyncio.Queue[JobEvent]) -> None:
+    def __init__(self, queue: asyncio.Queue[OpeningEvent]) -> None:
         self._queue = queue
 
     def __aiter__(self) -> "_Subscriber":
         return self
 
-    async def __anext__(self) -> JobEvent:
+    async def __anext__(self) -> OpeningEvent:
         return await self._queue.get()
 
 
 class EventHub:
-    """Process-local fan-out of job events to SSE subscribers."""
+    """Process-local fan-out of opening events to SSE subscribers."""
 
     def __init__(self) -> None:
-        self._subscribers: dict[str, set[asyncio.Queue[JobEvent]]] = {}
+        self._subscribers: dict[str, set[asyncio.Queue[OpeningEvent]]] = {}
 
     @asynccontextmanager
-    async def subscribe(self, job_id: str) -> AsyncIterator[AsyncIterator[JobEvent]]:
-        queue: asyncio.Queue[JobEvent] = asyncio.Queue()
-        subscribers = self._subscribers.setdefault(job_id, set())
+    async def subscribe(
+        self, opening_id: str
+    ) -> AsyncIterator[AsyncIterator[OpeningEvent]]:
+        queue: asyncio.Queue[OpeningEvent] = asyncio.Queue()
+        subscribers = self._subscribers.setdefault(opening_id, set())
         subscribers.add(queue)
         try:
             yield _Subscriber(queue)
         finally:
             subscribers.discard(queue)
             if not subscribers:
-                self._subscribers.pop(job_id, None)
+                self._subscribers.pop(opening_id, None)
 
-    def publish(self, job_id: str, event: JobEvent) -> None:
-        for queue in list(self._subscribers.get(job_id, ())):
+    def publish(self, opening_id: str, event: OpeningEvent) -> None:
+        for queue in list(self._subscribers.get(opening_id, ())):
             queue.put_nowait(event)
 
 
@@ -53,41 +55,47 @@ class EventPublisher:
         self.repository = repository
 
     async def publish_candidate_update(
-        self, job_id: str, candidate_id: str
+        self, opening_id: str, candidate_id: str
     ) -> None:
         candidate = await self.repository.get_candidate_result(candidate_id)
         completed_count, total_count = await self.repository.candidate_counts(
-            job_id
+            opening_id
         )
         self.hub.publish(
-            job_id,
-            JobEvent(
+            opening_id,
+            OpeningEvent(
                 "candidate.updated",
                 {
-                    "candidate": candidate.model_dump(mode="json"),
-                    "completed_count": completed_count,
-                    "total_count": total_count,
+                    "candidate": candidate.model_dump(
+                        mode="json", by_alias=True
+                    ),
+                    "completedCount": completed_count,
+                    "totalCount": total_count,
                 },
             ),
         )
-        await self.publish_job_progress(job_id)
+        await self.publish_opening_progress(opening_id)
 
-    async def publish_job_progress(self, job_id: str) -> None:
+    async def publish_opening_progress(self, opening_id: str) -> None:
         completed_count, total_count = await self.repository.candidate_counts(
-            job_id
+            opening_id
         )
         self.hub.publish(
-            job_id,
-            JobEvent(
-                "job.progress",
+            opening_id,
+            OpeningEvent(
+                "opening.progress",
                 {
-                    "completed_count": completed_count,
-                    "total_count": total_count,
+                    "completedCount": completed_count,
+                    "totalCount": total_count,
                 },
             ),
         )
-        if await self.repository.mark_job_complete_if_terminal(job_id):
-            snapshot = await self.repository.get_job_snapshot(job_id)
+        if await self.repository.mark_opening_complete_if_terminal(opening_id):
+            snapshot = await self.repository.get_opening_snapshot(opening_id)
             self.hub.publish(
-                job_id, JobEvent("job.complete", snapshot.model_dump(mode="json"))
+                opening_id,
+                OpeningEvent(
+                    "opening.complete",
+                    snapshot.model_dump(mode="json", by_alias=True),
+                ),
             )

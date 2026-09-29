@@ -369,6 +369,7 @@ class SQLiteRepository:
             updated_at=row["updated_at"],
             candidates=total,
             pending_review=pending,
+            is_final=bool(row["is_final"]),
         )
 
     async def _opening_criteria(self, opening_id: str) -> list[Criterion]:
@@ -585,7 +586,13 @@ class SQLiteRepository:
             )
             await self.db.commit()
 
-    async def save_candidate_result(self, result: Candidate) -> None:
+    async def save_candidate_result(
+        self,
+        candidate_id: str,
+        evaluations: list[CriterionEvaluation],
+        status: CandidateStatus,
+        total_score: float | None,
+    ) -> None:
         async with self._write_lock:
             await self.db.executemany(
                 "INSERT OR REPLACE INTO evaluations "
@@ -595,7 +602,7 @@ class SQLiteRepository:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
-                        result.id,
+                        candidate_id,
                         evaluation.criterion_id,
                         evaluation.status,
                         evaluation.confidence,
@@ -609,13 +616,13 @@ class SQLiteRepository:
                         if evaluation.reviewed_at
                         else None,
                     )
-                    for evaluation in result.evaluations
+                    for evaluation in evaluations
                 ],
             )
             await self.db.execute(
                 "UPDATE candidates SET status = ?, total_score = ?, "
                 "error_message = NULL, retryable = 0 WHERE id = ?",
-                (result.status, result.total_score, result.id),
+                (status, total_score, candidate_id),
             )
             await self.db.commit()
 

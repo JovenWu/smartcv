@@ -4,7 +4,8 @@ import pytest
 from pydantic import ValidationError
 
 from backend.app.schemas import (
-    CandidateResult,
+    Candidate,
+    CandidateFile,
     CandidateStatus,
     Criterion,
     CriterionEvaluation,
@@ -25,11 +26,14 @@ def make_candidate(
     status=CandidateStatus.COMPLETE,
     total_score=0.0,
 ):
-    return CandidateResult(
+    return Candidate(
         id=candidate_id,
-        filename=f"{candidate_id}.pdf",
-        upload_order=upload_order,
+        opening_id="o1",
+        name=candidate_id,
         status=status,
+        file=CandidateFile(filename=f"{candidate_id}.pdf", url="/x", mime_type="application/pdf"),
+        uploaded_at="2026-09-29T00:00:00+00:00",
+        upload_order=upload_order,
         evaluations=[],
         total_score=total_score,
         error_message=None,

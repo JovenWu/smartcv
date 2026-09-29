@@ -5,40 +5,35 @@ from backend.app.documents import (
     RendererUnavailable,
     UnreadableDocument,
     UnsupportedFile,
+    extract_identity,
     parse_cv,
 )
-from backend.app.schemas import (
-    CandidateResult,
-    CandidateStatus,
-    MatchStatus,
-)
+from backend.app.schemas import CandidateStatus, MatchStatus
 from backend.app.typesafe_adapter import RetryableEvaluationError
 
 _STOP_TIMEOUT_SECONDS = 10
 
 
-def build_candidate_result(candidate, evaluations) -> CandidateResult:
-    weights = {criterion.id: criterion.weight for criterion in candidate.criteria}
-    by_id = {evaluation.criterion_id: evaluation for evaluation in evaluations}
-    from backend.app.scoring import calculate_total_score, effective_fractions
+def candidate_outcome(
+    evaluations, criteria
+) -> tuple[CandidateStatus, float | None]:
+    """(status, weighted total) for a finished evaluation pass."""
+    from backend.app.scoring import (
+        calculate_total_score,
+        effective_fractions,
+    )
 
+    weights = {criterion.id: criterion.weight for criterion in criteria}
+    by_id = {evaluation.criterion_id: evaluation for evaluation in evaluations}
     total = calculate_total_score(weights, effective_fractions(by_id))
     flagged = any(
         evaluation.status == MatchStatus.NEEDS_REVIEW
         for evaluation in evaluations
     )
-    return CandidateResult(
-        id=candidate.id,
-        filename=candidate.filename,
-        upload_order=candidate.upload_order,
-        status=(
-            CandidateStatus.NEEDS_REVIEW if flagged else CandidateStatus.COMPLETE
-        ),
-        evaluations=list(evaluations),
-        total_score=total,
-        error_message=None,
-        retryable=False,
+    status = (
+        CandidateStatus.NEEDS_REVIEW if flagged else CandidateStatus.COMPLETE
     )
+    return status, total
 
 
 class CandidateWorkerPool:
@@ -100,7 +95,7 @@ class CandidateWorkerPool:
                 )
                 if work_item is not None:
                     await self.event_publisher.publish_candidate_update(
-                        work_item.job_id, candidate_id
+                        work_item.opening_id, candidate_id
                     )
             finally:
                 self._pending.discard(candidate_id)
@@ -114,7 +109,7 @@ class CandidateWorkerPool:
             candidate_id, CandidateStatus.EXTRACTING
         )
         await self.event_publisher.publish_candidate_update(
-            candidate.job_id, candidate_id
+            candidate.opening_id, candidate_id
         )
         try:
             parsed = await asyncio.to_thread(
@@ -125,7 +120,7 @@ class CandidateWorkerPool:
                 candidate_id, str(error)
             )
             await self.event_publisher.publish_candidate_update(
-                candidate.job_id, candidate_id
+                candidate.opening_id, candidate_id
             )
             return
         except RendererUnavailable as error:
@@ -133,7 +128,7 @@ class CandidateWorkerPool:
                 candidate_id, str(error), retryable=True
             )
             await self.event_publisher.publish_candidate_update(
-                candidate.job_id, candidate_id
+                candidate.opening_id, candidate_id
             )
             return
         except (UnsupportedFile, UnreadableDocument) as error:
@@ -141,17 +136,23 @@ class CandidateWorkerPool:
                 candidate_id, str(error), retryable=False
             )
             await self.event_publisher.publish_candidate_update(
-                candidate.job_id, candidate_id
+                candidate.opening_id, candidate_id
             )
             return
+        name, email = extract_identity(parsed.spans)
         await self.repository.save_source_spans(
-            candidate_id, parsed.preview_path, parsed.spans
+            candidate_id,
+            parsed.preview_path,
+            parsed.spans,
+            name=name,
+            email=email,
+            page_count=parsed.page_count,
         )
         await self.repository.set_candidate_status(
             candidate_id, CandidateStatus.EVALUATING
         )
         await self.event_publisher.publish_candidate_update(
-            candidate.job_id, candidate_id
+            candidate.opening_id, candidate_id
         )
         try:
             evaluations = await self.evaluator.evaluate_candidate(
@@ -162,11 +163,13 @@ class CandidateWorkerPool:
                 candidate_id, str(error), retryable=True
             )
             await self.event_publisher.publish_candidate_update(
-                candidate.job_id, candidate_id
+                candidate.opening_id, candidate_id
             )
             return
-        result = build_candidate_result(candidate, evaluations)
-        await self.repository.save_candidate_result(result)
+        status, total = candidate_outcome(evaluations, candidate.criteria)
+        await self.repository.save_candidate_result(
+            candidate_id, list(evaluations), status, total
+        )
         await self.event_publisher.publish_candidate_update(
-            candidate.job_id, candidate_id
+            candidate.opening_id, candidate_id
         )

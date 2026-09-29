@@ -43,13 +43,13 @@ def test_health_is_public(gated_client):
 
 
 def test_protected_routes_require_a_session(gated_client):
-    assert gated_client.get("/api/jobs/missing").status_code == 401
+    assert gated_client.get("/api/openings/missing").status_code == 401
     response = gated_client.post(
         "/api/weight-suggestions",
         json={"criteria": [{"id": "c1", "name": "Python", "description": ""}]},
     )
     assert response.status_code == 401
-    assert gated_client.get("/api/jobs/x/events").status_code == 401
+    assert gated_client.get("/api/openings/x/events").status_code == 401
 
 
 def test_session_endpoint_reports_auth_state(gated_client):
@@ -92,7 +92,7 @@ def test_login_sets_httponly_cookie_and_unlocks_api(gated_client):
     assert session["authenticated"] is True
     assert session["username"] == "recruiter"
 
-    assert gated_client.get("/api/jobs/missing").status_code == 404
+    assert gated_client.get("/api/openings/missing").status_code == 404
 
 
 def test_cookie_is_httponly(gated_client):
@@ -108,21 +108,21 @@ def test_logout_revokes_the_session(gated_client):
         "/api/auth/login",
         json={"username": "recruiter", "password": "s3cret"},
     )
-    assert gated_client.get("/api/jobs/missing").status_code == 404
+    assert gated_client.get("/api/openings/missing").status_code == 404
 
     assert gated_client.post("/api/auth/logout").status_code == 204
-    assert gated_client.get("/api/jobs/missing").status_code == 401
+    assert gated_client.get("/api/openings/missing").status_code == 401
     session = gated_client.get("/api/auth/session").json()
     assert session["authenticated"] is False
 
 
 def test_unknown_or_forged_cookie_is_rejected(gated_client):
     gated_client.cookies.set("smartcv_session", "forged-token")
-    assert gated_client.get("/api/jobs/missing").status_code == 401
+    assert gated_client.get("/api/openings/missing").status_code == 401
 
 
 def test_no_accounts_configured_means_open_access(open_client):
-    assert open_client.get("/api/jobs/missing").status_code == 404
+    assert open_client.get("/api/openings/missing").status_code == 404
     session = open_client.get("/api/auth/session").json()
     assert session == {
         "auth_required": False,

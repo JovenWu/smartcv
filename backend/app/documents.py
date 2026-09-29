@@ -39,6 +39,7 @@ class RendererUnavailable(DocumentError):
 class ParsedDocument:
     preview_path: Path
     spans: list[EvidenceSpan]
+    page_count: int
 
 
 def validate_upload(
@@ -66,8 +67,9 @@ def parse_cv(path: Path, original_filename: str) -> ParsedDocument:
         preview_path = path
     else:
         preview_path = _convert_docx_to_pdf(path, settings.previews_dir)
+    spans, page_count = extract_pdf_content(preview_path)
     return ParsedDocument(
-        preview_path=preview_path, spans=extract_pdf_spans(preview_path)
+        preview_path=preview_path, spans=spans, page_count=page_count
     )
 
 
@@ -90,10 +92,13 @@ def _require_docx_structure(path: Path) -> None:
         raise UnsupportedFile("File is not a valid DOCX")
 
 
-def extract_pdf_spans(path: Path) -> list[EvidenceSpan]:
+def extract_pdf_content(path: Path) -> tuple[list[EvidenceSpan], int]:
+    """Text spans (with bounding boxes) plus the document's page count."""
     spans: list[EvidenceSpan] = []
+    page_count = 0
     try:
         with pymupdf.open(path) as document:
+            page_count = document.page_count
             for page_number, page in enumerate(document, start=1):
                 blocks = page.get_text("blocks", sort=True)
                 for block_number, block in enumerate(blocks):
@@ -104,6 +109,12 @@ def extract_pdf_spans(path: Path) -> list[EvidenceSpan]:
                                 id=f"p{page_number}-b{block_number}",
                                 page_number=page_number,
                                 text=text,
+                                bbox={
+                                    "x": block[0],
+                                    "y": block[1],
+                                    "width": block[2] - block[0],
+                                    "height": block[3] - block[1],
+                                },
                             )
                         )
     except NeedsManualReview:
@@ -114,7 +125,46 @@ def extract_pdf_spans(path: Path) -> list[EvidenceSpan]:
         raise NeedsManualReview(
             "No selectable text; OCR is not supported in the MVP"
         )
+    return spans, page_count
+
+
+def extract_pdf_spans(path: Path) -> list[EvidenceSpan]:
+    spans, _ = extract_pdf_content(path)
     return spans
+
+
+_NAME_LINE = re.compile(
+    r"^[A-Za-z][A-Za-z'\-]*(?:[,\s]+[A-Za-z][A-Za-z'\-.]*){1,4}$"
+)
+
+
+def extract_identity(
+    spans: list[EvidenceSpan],
+) -> tuple[str | None, str | None]:
+    """Best-effort (name, email) for display — never sent to the evaluator."""
+    email: str | None = None
+    name: str | None = None
+    for span in spans:
+        if email is None:
+            match = _EMAIL.search(span.text)
+            if match:
+                email = match.group(0)
+        if name is None and span.page_number == 1:
+            first = (
+                span.text.strip().splitlines()[0].strip()
+                if span.text.strip()
+                else ""
+            )
+            if (
+                first
+                and len(first) <= 60
+                and "@" not in first
+                and _NAME_LINE.match(first)
+            ):
+                name = first
+        if name is not None and email is not None:
+            break
+    return name, email
 
 
 def _convert_docx_to_pdf(source_path: Path, previews_dir: Path) -> Path:

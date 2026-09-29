@@ -12,12 +12,13 @@ from backend.app.schemas import (
     CandidateStatus,
     CriterionEvaluation,
     MatchStatus,
+    OpeningCreate,
 )
 from backend.app.typesafe_adapter import (
     FakeEvaluator,
     RetryableEvaluationError,
 )
-from backend.app.worker import CandidateWorkerPool, build_candidate_result
+from backend.app.worker import CandidateWorkerPool, candidate_outcome
 from backend.tests.factories import make_criteria, write_pdf
 
 
@@ -30,24 +31,30 @@ async def repository(tmp_path):
 
 
 @pytest.fixture
-async def job(repository):
-    job_id = uuid.uuid4().hex
-    await repository.create_job(job_id, "Backend Engineer", make_criteria())
-    return job_id
+async def opening(repository):
+    opening_id = uuid.uuid4().hex
+    await repository.create_opening(
+        opening_id,
+        OpeningCreate(title="Backend Engineer", criteria=make_criteria()),
+    )
+    return opening_id
 
 
-async def add_candidate(repository, job_id, tmp_path, filename="cv.pdf", text=""):
+async def add_candidate(
+    repository, opening_id, tmp_path, filename="cv.pdf", text=""
+):
     stored = tmp_path / f"{uuid.uuid4().hex}"
     write_pdf(stored, text)
     candidate_id = uuid.uuid4().hex
     await repository.add_candidates(
-        job_id,
+        opening_id,
         [
             {
                 "id": candidate_id,
                 "filename": filename,
                 "stored_path": str(stored),
                 "upload_order": 0,
+                "mime_type": "application/pdf",
             }
         ],
     )
@@ -66,33 +73,45 @@ def make_pool(repository, tmp_path, evaluator=None, worker_count=4, events=None)
     return pool
 
 
-async def test_job_and_confirmed_weights_persist(repository, job):
-    snapshot = await repository.get_job_snapshot(job)
-    assert snapshot.title == "Backend Engineer"
-    assert [c.id for c in snapshot.criteria] == ["python", "production", "postgresql"]
-    assert [c.weight for c in snapshot.criteria] == [5, 4, 3]
-    assert snapshot.total_count == 0
-    assert snapshot.is_final is False
+async def test_opening_and_confirmed_weights_persist(repository, opening):
+    snapshot = await repository.get_opening_snapshot(opening)
+    assert snapshot.opening.title == "Backend Engineer"
+    assert [c.id for c in snapshot.opening.criteria] == [
+        "python",
+        "production",
+        "postgresql",
+    ]
+    assert [c.weight for c in snapshot.opening.criteria] == [5, 4, 3]
+    assert snapshot.candidates == []
+    assert snapshot.opening.is_final is False
 
 
-async def test_each_candidate_updates_independently(repository, job, tmp_path):
+async def test_each_candidate_updates_independently(
+    repository, opening, tmp_path
+):
     candidate_a = await add_candidate(
-        repository, job, tmp_path, text="Python and PostgreSQL production services"
+        repository,
+        opening,
+        tmp_path,
+        text="Python and PostgreSQL production services",
     )
     candidate_b = await add_candidate(
-        repository, job, tmp_path, text="customer support work"
+        repository, opening, tmp_path, text="customer support work"
     )
     await repository.set_candidate_status(candidate_a, CandidateStatus.FAILED)
-    snapshot = await repository.get_job_snapshot(job)
+    snapshot = await repository.get_opening_snapshot(opening)
     by_id = {c.id: c for c in snapshot.candidates}
     assert by_id[candidate_a].status == CandidateStatus.FAILED
     assert by_id[candidate_b].status == CandidateStatus.QUEUED
 
 
-async def test_process_candidate_end_to_end(repository, job, tmp_path):
+async def test_process_candidate_end_to_end(repository, opening, tmp_path):
     candidate_id = await add_candidate(
-        repository, job, tmp_path,
-        text="Built Python and PostgreSQL production services for years",
+        repository,
+        opening,
+        tmp_path,
+        text="Jane Doe\njane@example.com\n"
+        "Built Python and PostgreSQL production services for years",
     )
     pool = make_pool(repository, tmp_path)
     await pool.start()
@@ -113,13 +132,17 @@ async def test_process_candidate_end_to_end(repository, job, tmp_path):
         assert result.total_score is not None
         assert result.total_score > 0
         assert len(result.evaluations) == 3
+        assert result.name == "Jane Doe"
+        assert result.email == "jane@example.com"
+        assert result.file.page_count == 1
+        assert result.file.url.endswith("/preview")
     finally:
         await pool.stop()
 
 
-async def test_image_pdf_routes_to_manual_review(repository, job, tmp_path):
+async def test_image_pdf_routes_to_manual_review(repository, opening, tmp_path):
     candidate_id = await add_candidate(
-        repository, job, tmp_path, filename="scan.pdf", text=""
+        repository, opening, tmp_path, filename="scan.pdf", text=""
     )
     pool = make_pool(repository, tmp_path)
     await pool.start()
@@ -141,18 +164,22 @@ async def test_image_pdf_routes_to_manual_review(repository, job, tmp_path):
         await pool.stop()
 
 
-async def test_invalid_signature_fails_without_retry(repository, job, tmp_path):
+async def test_invalid_signature_fails_without_retry(
+    repository, opening, tmp_path
+):
     stored = tmp_path / uuid.uuid4().hex
     stored.write_bytes(b"garbage")
     candidate_id = uuid.uuid4().hex
     await repository.add_candidates(
-        job_id=job,
-        items=[{
-            "id": candidate_id,
-            "filename": "cv.pdf",
-            "stored_path": str(stored),
-            "upload_order": 0,
-        }],
+        opening_id=opening,
+        items=[
+            {
+                "id": candidate_id,
+                "filename": "cv.pdf",
+                "stored_path": str(stored),
+                "upload_order": 0,
+            }
+        ],
     )
     pool = make_pool(repository, tmp_path)
     await pool.start()
@@ -172,9 +199,9 @@ async def test_invalid_signature_fails_without_retry(repository, job, tmp_path):
         await pool.stop()
 
 
-async def test_evaluator_error_fails_retryable(repository, job, tmp_path):
+async def test_evaluator_error_fails_retryable(repository, opening, tmp_path):
     candidate_id = await add_candidate(
-        repository, job, tmp_path, text="Python services"
+        repository, opening, tmp_path, text="Python services"
     )
 
     class FailingEvaluator:
@@ -198,7 +225,7 @@ async def test_evaluator_error_fails_retryable(repository, job, tmp_path):
         await pool.stop()
 
 
-async def test_worker_respects_concurrency_limit(repository, job, tmp_path):
+async def test_worker_respects_concurrency_limit(repository, opening, tmp_path):
     active = 0
     max_active = 0
     lock = threading.Lock()
@@ -224,13 +251,15 @@ async def test_worker_respects_concurrency_limit(repository, job, tmp_path):
         cid = uuid.uuid4().hex
         ids.append(cid)
         await repository.add_candidates(
-            job,
-            [{
-                "id": cid,
-                "filename": f"cv{index}.pdf",
-                "stored_path": str(stored),
-                "upload_order": index,
-            }],
+            opening,
+            [
+                {
+                    "id": cid,
+                    "filename": f"cv{index}.pdf",
+                    "stored_path": str(stored),
+                    "upload_order": index,
+                }
+            ],
         )
 
     worker_module.parse_cv = counted_parse
@@ -241,12 +270,13 @@ async def test_worker_respects_concurrency_limit(repository, job, tmp_path):
             pool.enqueue(cid)
         deadline = time.time() + 30
         while time.time() < deadline:
-            snapshot = await repository.get_job_snapshot(job)
-            if snapshot.completed_count == 8:
+            snapshot = await repository.get_opening_snapshot(opening)
+            done, total = await repository.candidate_counts(opening)
+            if done == 8 and total == 8:
                 break
             await asyncio.sleep(0.05)
-        snapshot = await repository.get_job_snapshot(job)
-        assert snapshot.completed_count == 8
+        done, total = await repository.candidate_counts(opening)
+        assert done == 8
         assert max_active <= 4
     finally:
         worker_module.parse_cv = real_parse
@@ -254,12 +284,14 @@ async def test_worker_respects_concurrency_limit(repository, job, tmp_path):
 
 
 async def test_resumable_candidates_are_reenqueued_on_start(
-    repository, job, tmp_path
+    repository, opening, tmp_path
 ):
     candidate_id = await add_candidate(
-        repository, job, tmp_path, text="Python PostgreSQL production"
+        repository, opening, tmp_path, text="Python PostgreSQL production"
     )
-    await repository.set_candidate_status(candidate_id, CandidateStatus.EXTRACTING)
+    await repository.set_candidate_status(
+        candidate_id, CandidateStatus.EXTRACTING
+    )
     resumable = await repository.list_resumable_candidates()
     assert [c.id for c in resumable] == [candidate_id]
 
@@ -278,9 +310,9 @@ async def test_resumable_candidates_are_reenqueued_on_start(
         await pool.stop()
 
 
-async def test_retry_is_idempotent(repository, job, tmp_path):
+async def test_retry_is_idempotent(repository, opening, tmp_path):
     candidate_id = await add_candidate(
-        repository, job, tmp_path, text="Python PostgreSQL production"
+        repository, opening, tmp_path, text="Python PostgreSQL production"
     )
     pool = make_pool(repository, tmp_path)
     await pool.start()
@@ -293,7 +325,7 @@ async def test_retry_is_idempotent(repository, job, tmp_path):
             if result.status == CandidateStatus.COMPLETE:
                 break
             await asyncio.sleep(0.05)
-        snapshot = await repository.get_job_snapshot(job)
+        snapshot = await repository.get_opening_snapshot(opening)
         assert len(snapshot.candidates) == 1
         result = await repository.get_candidate_result(candidate_id)
         assert result.status == CandidateStatus.COMPLETE
@@ -301,9 +333,11 @@ async def test_retry_is_idempotent(repository, job, tmp_path):
         await pool.stop()
 
 
-async def test_manual_override_recalculates_total(repository, job, tmp_path):
+async def test_manual_override_recalculates_total(
+    repository, opening, tmp_path
+):
     candidate_id = await add_candidate(
-        repository, job, tmp_path, text="customer support only"
+        repository, opening, tmp_path, text="customer support only"
     )
     pool = make_pool(repository, tmp_path)
     await pool.start()
@@ -312,7 +346,10 @@ async def test_manual_override_recalculates_total(repository, job, tmp_path):
         deadline = time.time() + 10
         while time.time() < deadline:
             result = await repository.get_candidate_result(candidate_id)
-            if result.status in {CandidateStatus.COMPLETE, CandidateStatus.NEEDS_REVIEW}:
+            if result.status in {
+                CandidateStatus.COMPLETE,
+                CandidateStatus.NEEDS_REVIEW,
+            }:
                 break
             await asyncio.sleep(0.05)
     finally:
@@ -321,38 +358,34 @@ async def test_manual_override_recalculates_total(repository, job, tmp_path):
     result = await repository.get_candidate_result(candidate_id)
     before = result.total_score
     updated = await repository.update_manual_evaluation(
-        candidate_id, "python", manual_fraction=1.0, review_note="Verified"
+        candidate_id,
+        "python",
+        manual_fraction=1.0,
+        review_note="Verified",
+        reviewed_by="tester",
     )
     assert updated.evaluations[0].manual_fraction == 1.0
     assert updated.evaluations[0].status == MatchStatus.REVIEWED
+    assert updated.evaluations[0].reviewed_by == "tester"
+    assert updated.evaluations[0].reviewed_at is not None
     assert updated.total_score is not None
     assert updated.total_score != before
 
 
-async def test_terminal_marker_is_atomic(repository, job, tmp_path):
+async def test_terminal_marker_is_atomic(repository, opening, tmp_path):
     candidate_id = await add_candidate(
-        repository, job, tmp_path, text="Python PostgreSQL production"
+        repository, opening, tmp_path, text="Python PostgreSQL production"
     )
-    assert await repository.mark_job_complete_if_terminal(job) is False
-    await repository.set_candidate_status(candidate_id, CandidateStatus.COMPLETE)
-    assert await repository.mark_job_complete_if_terminal(job) is True
-    assert await repository.mark_job_complete_if_terminal(job) is False
+    assert await repository.mark_opening_complete_if_terminal(opening) is False
+    await repository.set_candidate_status(
+        candidate_id, CandidateStatus.COMPLETE
+    )
+    assert await repository.mark_opening_complete_if_terminal(opening) is True
+    assert await repository.mark_opening_complete_if_terminal(opening) is False
 
 
-def test_build_candidate_result_flags_uncertain_evaluations():
+def test_candidate_outcome_flags_uncertain_evaluations():
     criteria = make_criteria()
-    work_item = type(
-        "WorkItem",
-        (),
-        {
-            "id": "c1",
-            "job_id": "j1",
-            "filename": "cv.pdf",
-            "stored_path": "/x",
-            "upload_order": 0,
-            "criteria": criteria,
-        },
-    )()
     evaluations = [
         CriterionEvaluation(
             criterion_id="python",
@@ -373,6 +406,6 @@ def test_build_candidate_result_flags_uncertain_evaluations():
             model_fraction=0.0,
         ),
     ]
-    result = build_candidate_result(work_item, evaluations)
-    assert result.status == CandidateStatus.NEEDS_REVIEW
-    assert result.total_score == round(100 * (5 * 1.0 + 4 * 1.0 + 3 * 0.0) / 12, 2)
+    status, total = candidate_outcome(evaluations, criteria)
+    assert status == CandidateStatus.NEEDS_REVIEW
+    assert total == round(100 * (5 * 1.0 + 4 * 1.0 + 3 * 0.0) / 12, 2)

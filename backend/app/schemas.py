@@ -106,6 +106,8 @@ class Opening(ApiModel):
     updated_at: datetime | None = None
     candidates: int = Field(default=0, ge=0)
     pending_review: int = Field(default=0, ge=0)
+    # True once every candidate reached a terminal state.
+    is_final: bool = False
 
 
 class OpeningCreate(ApiModel):

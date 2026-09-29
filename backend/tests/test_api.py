@@ -33,13 +33,14 @@ def client(app):
         yield client
 
 
-def make_job(client):
+def make_opening(client):
     response = client.post(
-        "/api/jobs",
+        "/api/openings",
         json={
             "title": "Backend Engineer",
             "criteria": [
-                c.model_dump(mode="json") for c in make_criteria()
+                c.model_dump(mode="json", by_alias=True)
+                for c in make_criteria()
             ],
         },
     )
@@ -59,28 +60,28 @@ def pdf_bytes(text: str) -> bytes:
     return data
 
 
-def wait_for_terminal(client, job_id, timeout=15):
+def wait_for_terminal(client, opening_id, timeout=15):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        snapshot = client.get(f"/api/jobs/{job_id}").json()
-        if snapshot["is_final"]:
-            return snapshot
+        opening = client.get(f"/api/openings/{opening_id}").json()
+        if opening["isFinal"]:
+            return opening
         time.sleep(0.05)
-    raise AssertionError("job did not reach a terminal state")
+    raise AssertionError("opening did not reach a terminal state")
 
 
-def test_create_job_returns_snapshot(client):
-    job_id = make_job(client)
-    snapshot = client.get(f"/api/jobs/{job_id}").json()
-    assert snapshot["title"] == "Backend Engineer"
-    assert len(snapshot["criteria"]) == 3
-    assert snapshot["total_count"] == 0
-    assert snapshot["is_final"] is False
+def test_create_opening_returns_opening(client):
+    opening_id = make_opening(client)
+    opening = client.get(f"/api/openings/{opening_id}").json()
+    assert opening["title"] == "Backend Engineer"
+    assert len(opening["criteria"]) == 3
+    assert opening["candidates"] == 0
+    assert opening["isFinal"] is False
 
 
-def test_create_job_rejects_invalid_weight(client):
+def test_create_opening_rejects_invalid_weight(client):
     response = client.post(
-        "/api/jobs",
+        "/api/openings",
         json={
             "title": "Role",
             "criteria": [
@@ -90,7 +91,7 @@ def test_create_job_rejects_invalid_weight(client):
     )
     assert response.status_code == 422
     response = client.post(
-        "/api/jobs",
+        "/api/openings",
         json={
             "title": "Role",
             "criteria": [
@@ -101,24 +102,27 @@ def test_create_job_rejects_invalid_weight(client):
     assert response.status_code == 422
 
 
-def test_unknown_job_returns_404(client):
-    assert client.get("/api/jobs/nope").status_code == 404
+def test_unknown_opening_returns_404(client):
+    assert client.get("/api/openings/nope").status_code == 404
     files = [("files", ("a.pdf", pdf_bytes("x"), "application/pdf"))]
-    assert client.post("/api/jobs/nope/cvs", files=files).status_code == 404
+    assert (
+        client.post("/api/openings/nope/candidates", files=files).status_code
+        == 404
+    )
 
 
 def test_mixed_batch_queues_valid_and_fails_invalid(client):
-    job_id = make_job(client)
+    opening_id = make_opening(client)
     files = [
         ("files", ("good.pdf", pdf_bytes("Built Python and PostgreSQL production systems"), "application/pdf")),
         ("files", ("corrupt.pdf", b"not a pdf", "application/pdf")),
         ("files", ("notes.txt", b"plain text", "text/plain")),
     ]
-    response = client.post(f"/api/jobs/{job_id}/cvs", files=files)
+    response = client.post(f"/api/openings/{opening_id}/candidates", files=files)
     assert response.status_code == 201
     body = response.json()
-    assert body["total_count"] == 3
-    by_name = {c["filename"]: c for c in body["candidates"]}
+    assert body["totalCount"] == 3
+    by_name = {c["file"]["filename"]: c for c in body["candidates"]}
     assert by_name["good.pdf"]["status"] == "queued"
     assert by_name["corrupt.pdf"]["status"] == "failed"
     assert by_name["corrupt.pdf"]["retryable"] is False
@@ -127,92 +131,123 @@ def test_mixed_batch_queues_valid_and_fails_invalid(client):
 
 
 def test_batch_over_limit_is_413_without_writes(client, settings):
-    job_id = make_job(client)
+    opening_id = make_opening(client)
     settings.max_batch_files = 3
     files = [
         ("files", (f"cv{i}.pdf", pdf_bytes("x"), "application/pdf"))
         for i in range(4)
     ]
-    response = client.post(f"/api/jobs/{job_id}/cvs", files=files)
+    response = client.post(f"/api/openings/{opening_id}/candidates", files=files)
     assert response.status_code == 413
-    snapshot = client.get(f"/api/jobs/{job_id}").json()
-    assert snapshot["total_count"] == 0
+    opening = client.get(f"/api/openings/{opening_id}").json()
+    assert opening["candidates"] == 0
 
 
 def test_batch_at_limit_is_accepted(client, settings):
-    job_id = make_job(client)
+    opening_id = make_opening(client)
     settings.max_batch_files = 4
     files = [
         ("files", (f"cv{i}.pdf", pdf_bytes(f"Python {i}"), "application/pdf"))
         for i in range(4)
     ]
-    response = client.post(f"/api/jobs/{job_id}/cvs", files=files)
+    response = client.post(f"/api/openings/{opening_id}/candidates", files=files)
     assert response.status_code == 201
-    assert response.json()["total_count"] == 4
+    assert response.json()["totalCount"] == 4
 
 
 def test_full_batch_completes_with_scores(client):
-    job_id = make_job(client)
+    opening_id = make_opening(client)
     files = [
         ("files", ("strong.pdf", pdf_bytes("Built Python and PostgreSQL production services for three years"), "application/pdf")),
         ("files", ("weak.pdf", pdf_bytes("Worked in customer support."), "application/pdf")),
     ]
-    client.post(f"/api/jobs/{job_id}/cvs", files=files)
-    snapshot = wait_for_terminal(client, job_id)
-    assert snapshot["is_final"] is True
-    assert snapshot["completed_count"] == 2
-    by_name = {c["filename"]: c for c in snapshot["candidates"]}
+    client.post(f"/api/openings/{opening_id}/candidates", files=files)
+    wait_for_terminal(client, opening_id)
+    candidates = client.get(f"/api/openings/{opening_id}/candidates").json()
+    by_name = {c["file"]["filename"]: c for c in candidates}
     strong = by_name["strong.pdf"]
     weak = by_name["weak.pdf"]
-    assert strong["total_score"] is not None
-    assert strong["total_score"] > 0
+    assert strong["totalScore"] is not None
+    assert strong["totalScore"] > 0
     assert len(strong["evaluations"]) == 3
+    assert strong["isFinal"] is True
     assert weak["status"] in {"complete", "needs_review"}
-    assert weak["total_score"] is not None
+    assert weak["totalScore"] is not None
 
 
 def test_manual_review_updates_total(client):
-    job_id = make_job(client)
+    opening_id = make_opening(client)
     files = [
         ("files", ("cv.pdf", pdf_bytes("Worked in customer support."), "application/pdf")),
     ]
-    upload = client.post(f"/api/jobs/{job_id}/cvs", files=files).json()
+    upload = client.post(
+        f"/api/openings/{opening_id}/candidates", files=files
+    ).json()
     candidate_id = upload["candidates"][0]["id"]
-    wait_for_terminal(client, job_id)
-    candidate = client.get(f"/api/jobs/{job_id}").json()["candidates"][0]
-    before = candidate["total_score"]
+    wait_for_terminal(client, opening_id)
+    candidate = client.get(
+        f"/api/openings/{opening_id}/candidates"
+    ).json()[0]
+    before = candidate["totalScore"]
     response = client.patch(
-        f"/api/jobs/{job_id}/candidates/{candidate_id}/criteria/python",
-        json={"match_level": "strong", "review_note": "Verified in interview"},
+        f"/api/openings/{opening_id}/candidates/{candidate_id}"
+        "/criteria/python",
+        json={"matchLevel": "strong", "reviewNote": "Verified in interview"},
     )
     assert response.status_code == 200
     updated = response.json()
     evaluation = next(
-        e for e in updated["evaluations"] if e["criterion_id"] == "python"
+        e for e in updated["evaluations"] if e["criterionId"] == "python"
     )
     assert evaluation["status"] == "reviewed"
-    assert evaluation["manual_fraction"] == 1.0
-    assert evaluation["review_note"] == "Verified in interview"
-    assert updated["total_score"] != before
+    assert evaluation["manualFraction"] == 1.0
+    assert evaluation["reviewNote"] == "Verified in interview"
+    assert evaluation["reviewedBy"] == "local"
+    assert evaluation["reviewedAt"] is not None
+    assert updated["totalScore"] != before
+
+
+def test_decision_endpoint_updates_candidate(client):
+    opening_id = make_opening(client)
+    files = [
+        ("files", ("cv.pdf", pdf_bytes("Python"), "application/pdf")),
+    ]
+    upload = client.post(
+        f"/api/openings/{opening_id}/candidates", files=files
+    ).json()
+    candidate_id = upload["candidates"][0]["id"]
+    response = client.patch(
+        f"/api/openings/{opening_id}/candidates/{candidate_id}/decision",
+        json={"decision": "shortlisted"},
+    )
+    assert response.status_code == 200
+    assert response.json()["decision"] == "shortlisted"
+    response = client.patch(
+        f"/api/openings/{opening_id}/candidates/{candidate_id}/decision",
+        json={"decision": "bogus"},
+    )
+    assert response.status_code == 422
 
 
 def test_patch_unknown_candidate_or_criterion_is_404(client):
-    job_id = make_job(client)
+    opening_id = make_opening(client)
     response = client.patch(
-        f"/api/jobs/{job_id}/candidates/nope/criteria/python",
-        json={"match_level": "strong"},
+        f"/api/openings/{opening_id}/candidates/nope/criteria/python",
+        json={"matchLevel": "strong"},
     )
     assert response.status_code == 404
 
 
 def test_non_retryable_failure_rejects_retry(client):
-    job_id = make_job(client)
+    opening_id = make_opening(client)
     files = [("files", ("corrupt.pdf", b"junk", "application/pdf"))]
-    upload = client.post(f"/api/jobs/{job_id}/cvs", files=files).json()
+    upload = client.post(
+        f"/api/openings/{opening_id}/candidates", files=files
+    ).json()
     candidate_id = upload["candidates"][0]["id"]
-    wait_for_terminal(client, job_id)
+    wait_for_terminal(client, opening_id)
     response = client.post(
-        f"/api/jobs/{job_id}/candidates/{candidate_id}/retry"
+        f"/api/openings/{opening_id}/candidates/{candidate_id}/retry"
     )
     assert response.status_code == 409
 
@@ -231,47 +266,56 @@ def test_retryable_failure_can_be_retried(settings, tmp_path):
         async def suggest_weights(self, criteria):
             return await fake.suggest_weights(criteria)
 
+        async def suggest_criteria(self, request):
+            return await fake.suggest_criteria(request)
+
     app = create_app(settings, evaluator=FlakyEvaluator())
     with TestClient(app) as client:
-        job_id = make_job(client)
+        opening_id = make_opening(client)
         files = [
             ("files", ("cv.pdf", pdf_bytes("Built Python services"), "application/pdf"))
         ]
-        upload = client.post(f"/api/jobs/{job_id}/cvs", files=files).json()
+        upload = client.post(
+            f"/api/openings/{opening_id}/candidates", files=files
+        ).json()
         candidate_id = upload["candidates"][0]["id"]
-        snapshot = wait_for_terminal(client, job_id)
-        candidate = snapshot["candidates"][0]
+        wait_for_terminal(client, opening_id)
+        candidate = client.get(
+            f"/api/openings/{opening_id}/candidates"
+        ).json()[0]
         assert candidate["status"] == "failed"
         assert candidate["retryable"] is True
         response = client.post(
-            f"/api/jobs/{job_id}/candidates/{candidate_id}/retry"
+            f"/api/openings/{opening_id}/candidates/{candidate_id}/retry"
         )
         assert response.status_code == 200
-        snapshot = wait_for_terminal(client, job_id)
-        candidate = snapshot["candidates"][0]
+        wait_for_terminal(client, opening_id)
+        candidate = client.get(
+            f"/api/openings/{opening_id}/candidates"
+        ).json()[0]
         assert candidate["status"] == "complete"
-        assert candidate["total_score"] is not None
+        assert candidate["totalScore"] is not None
 
 
 def test_sse_sends_final_snapshot_and_closes(client):
-    job_id = make_job(client)
+    opening_id = make_opening(client)
     client.post(
-        f"/api/jobs/{job_id}/cvs",
+        f"/api/openings/{opening_id}/candidates",
         files=[
             ("files", ("a.pdf", pdf_bytes("Python PostgreSQL production"), "application/pdf")),
         ],
     )
-    wait_for_terminal(client, job_id)
-    response = client.get(f"/api/jobs/{job_id}/events")
+    wait_for_terminal(client, opening_id)
+    response = client.get(f"/api/openings/{opening_id}/events")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.headers["cache-control"] == "no-cache"
     assert "event: snapshot" in response.text
-    assert '"is_final":true' in response.text
+    assert '"isFinal":true' in response.text
 
 
-def test_sse_unknown_job_is_404(client):
-    response = client.get("/api/jobs/nope/events")
+def test_sse_unknown_opening_is_404(client):
+    response = client.get("/api/openings/nope/events")
     assert response.status_code == 404
 
 
@@ -288,29 +332,39 @@ def test_weight_suggestions_endpoint(client):
     assert response.status_code == 200
     suggestions = response.json()["suggestions"]
     assert len(suggestions) == 2
-    assert all(1 <= s["proposed_weight"] <= 5 for s in suggestions)
+    assert all(1 <= s["proposedWeight"] <= 5 for s in suggestions)
 
 
 def test_preview_and_spans_endpoints(client):
-    job_id = make_job(client)
+    opening_id = make_opening(client)
     files = [
         ("files", ("cv.pdf", pdf_bytes("Built Python services"), "application/pdf"))
     ]
-    upload = client.post(f"/api/jobs/{job_id}/cvs", files=files).json()
+    upload = client.post(
+        f"/api/openings/{opening_id}/candidates", files=files
+    ).json()
     candidate_id = upload["candidates"][0]["id"]
-    wait_for_terminal(client, job_id)
+    wait_for_terminal(client, opening_id)
     spans = client.get(
-        f"/api/jobs/{job_id}/candidates/{candidate_id}/spans"
+        f"/api/openings/{opening_id}/candidates/{candidate_id}/spans"
     )
     assert spans.status_code == 200
-    assert spans.json()[0]["page_number"] == 1
+    assert spans.json()[0]["pageNumber"] == 1
     assert "Python services" in spans.json()[0]["text"]
+    assert spans.json()[0]["bbox"]["width"] > 0
     preview = client.get(
-        f"/api/jobs/{job_id}/candidates/{candidate_id}/preview"
+        f"/api/openings/{opening_id}/candidates/{candidate_id}/preview"
     )
     assert preview.status_code == 200
     assert preview.content.startswith(b"%PDF-")
+    candidate = client.get(
+        f"/api/openings/{opening_id}/candidates"
+    ).json()[0]
+    assert candidate["file"]["url"].endswith("/preview")
+    assert candidate["file"]["pageCount"] == 1
     assert (
-        client.get(f"/api/jobs/{job_id}/candidates/nope/preview").status_code
+        client.get(
+            f"/api/openings/{opening_id}/candidates/nope/preview"
+        ).status_code
         == 404
     )

@@ -92,7 +92,7 @@ async def test_strong_match_selects_source_span(evaluator):
     by_id = {e.criterion_id: e for e in results}
     assert by_id["python"].status == MatchStatus.STRONG
     assert by_id["python"].model_fraction == 1.0
-    assert by_id["python"].evidence_span_id == "p1-b0"
+    assert by_id["python"].evidence_span_ids == ["p1-b0"]
     assert by_id["db"].status == MatchStatus.STRONG
 
 
@@ -102,7 +102,7 @@ async def test_no_match_with_level_zero_is_not_found(evaluator):
     results = await evaluator.evaluate_candidate(CRITERIA, SPANS)
     assert all(e.status == MatchStatus.NOT_FOUND for e in results)
     assert all(e.model_fraction == 0.0 for e in results)
-    assert all(e.evidence_span_id is None for e in results)
+    assert all(e.evidence_span_ids == [] for e in results)
 
 
 async def test_partial_level_maps_to_half_fraction(evaluator):
@@ -137,7 +137,7 @@ async def test_contradictory_choice_and_score_is_flagged(evaluator):
     by_id = {e.criterion_id: e for e in results}
     assert by_id["python"].status == MatchStatus.NEEDS_REVIEW
     assert by_id["python"].model_fraction == 1.0
-    assert by_id["python"].evidence_span_id is None
+    assert by_id["python"].evidence_span_ids == []
 
 
 async def test_span_selected_while_not_found_is_flagged(evaluator):
@@ -156,7 +156,7 @@ async def test_unknown_span_id_is_flagged(evaluator):
     results = await evaluator.evaluate_candidate(CRITERIA, SPANS)
     by_id = {e.criterion_id: e for e in results}
     assert by_id["python"].status == MatchStatus.NEEDS_REVIEW
-    assert by_id["python"].evidence_span_id is None
+    assert by_id["python"].evidence_span_ids == []
 
 
 async def test_request_contains_masked_spans_and_no_match_option(evaluator):

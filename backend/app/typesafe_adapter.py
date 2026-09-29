@@ -178,7 +178,7 @@ class TypeSafeEvaluator:
                     status=status,
                     confidence=confidence,
                     model_fraction=fraction,
-                    evidence_span_id=cited.id if cited else None,
+                    evidence_span_ids=[cited.id] if cited else [],
                 )
             )
         return evaluations
@@ -239,7 +239,9 @@ class FakeEvaluator:
                     status=status,
                     confidence=0.95,
                     model_fraction=fraction,
-                    evidence_span_id=best_span.id if best_span else None,
+                    evidence_span_ids=(
+                        [best_span.id] if best_span else []
+                    ),
                 )
             )
         return evaluations

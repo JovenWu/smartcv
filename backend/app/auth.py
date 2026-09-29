@@ -64,6 +64,11 @@ def require_session(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Authentication required")
 
 
+def current_username(request: Request) -> str:
+    """Session username for audit fields; 'local' when auth is disabled."""
+    return _session_user(request) or "local"
+
+
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
