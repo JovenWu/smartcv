@@ -1,6 +1,11 @@
-import { useEffect, useRef, useState } from "react"
+import { useState } from "react"
 import { LoaderCircleIcon } from "lucide-react"
 
+import {
+  openingsApi,
+  type ImportCriterion,
+  type ImportDraft,
+} from "@/lib/api"
 import type { NewOpeningInput } from "@/lib/openings"
 import { Button } from "@/components/ui/button"
 import { FileDropzone } from "@/components/file-dropzone"
@@ -13,17 +18,32 @@ import {
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
 
-function titleFromUrl(url: string): string {
-  try {
-    const host = new URL(url).hostname.replace(/^www\./, "")
-    return `${host} listing`
-  } catch {
-    return "Imported listing"
+function toCriterion(c: ImportCriterion) {
+  return {
+    name: c.name,
+    description: c.description,
+    weight: c.weight ?? c.suggestedWeight ?? 3,
+    required: c.required,
+    suggestedWeight: c.suggestedWeight,
+    suggestionConfidence: c.suggestionConfidence,
   }
 }
 
-function titleFromFile(name: string): string {
-  return name.replace(/\.[^.]+$/, "") || "Imported listing"
+function toInput(draft: ImportDraft): Partial<NewOpeningInput> {
+  return {
+    title: draft.title,
+    department: draft.department,
+    location: draft.location,
+    description: draft.description,
+    employmentType: draft.employmentType as NewOpeningInput["employmentType"],
+    workArrangement: draft.workArrangement as NewOpeningInput["workArrangement"],
+    experienceLevel: draft.experienceLevel ?? undefined,
+    educationLevel: draft.educationLevel ?? undefined,
+    skills: draft.skills,
+    closesAt: draft.closesAt ?? undefined,
+    source: draft.source,
+    criteria: draft.criteria.map(toCriterion),
+  }
 }
 
 export function ImportOpeningForm({
@@ -33,26 +53,31 @@ export function ImportOpeningForm({
 }) {
   const [link, setLink] = useState("")
   const [processing, setProcessing] = useState(false)
-  const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => () => clearTimeout(timer.current), [])
-
-  // Simulated extraction — the backend parser will return real fields here.
-  const extract = (draft: Partial<NewOpeningInput>) => {
+  const run = async (call: Promise<ImportDraft>) => {
     setProcessing(true)
-    timer.current = setTimeout(() => onExtracted(draft), 900)
+    setError(null)
+    try {
+      onExtracted(toInput(await call))
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not read the listing.",
+      )
+      setProcessing(false)
+    }
   }
 
   const importLink = (event: React.FormEvent) => {
     event.preventDefault()
     if (!link.trim()) return
-    extract({ title: titleFromUrl(link.trim()) })
+    void run(openingsApi.importLink(link.trim()))
   }
 
   const importFiles = (files: File[]) => {
     const file = files[0]
     if (!file) return
-    extract({ title: titleFromFile(file.name) })
+    void run(openingsApi.importFile(file))
   }
 
   if (processing) {
@@ -100,11 +125,12 @@ export function ImportOpeningForm({
       </div>
 
       <FileDropzone
-        accept=".pdf,image/*"
-        title="Drop a PDF or screenshot here"
+        accept=".pdf,.docx,image/*"
+        title="Drop a PDF, DOCX, or screenshot here"
         hint="or click to browse files"
         onFiles={importFiles}
       />
+      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
     </div>
   )
 }

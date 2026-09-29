@@ -123,11 +123,11 @@ export default function OpeningDetailPage() {
           {candidates.length === 0 ? (
             <FileDropzone
               multiple
-              accept=".pdf,image/*"
+              accept=".pdf,.docx"
               className="h-full justify-center"
               title="No candidates yet — drop CVs here"
-              hint="PDF or image · multiple files · or click to browse a batch"
-              onFiles={(files) => addCandidates(opening.id, files)}
+              hint="PDF or DOCX · multiple files · or click to browse a batch"
+              onFiles={(files) => void addCandidates(opening.id, files)}
             />
           ) : (
             <Table>

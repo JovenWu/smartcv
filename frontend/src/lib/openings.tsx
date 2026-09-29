@@ -9,6 +9,11 @@ import {
   UsersIcon,
 } from "lucide-react"
 
+import {
+  openingsApi,
+  type NewOpeningPayload,
+  type SkillSuggestion,
+} from "@/lib/api"
 import type {
   EmploymentType,
   Opening as OpeningModel,
@@ -54,8 +59,11 @@ export function openingMeta(
 
 export interface NewCriterionInput {
   name: string
-  weight: number
+  description?: string
+  weight?: number
   required?: boolean
+  suggestedWeight?: number
+  suggestionConfidence?: number
 }
 
 export interface NewOpeningInput {
@@ -69,165 +77,27 @@ export interface NewOpeningInput {
   educationLevel?: string
   skills?: string[]
   closesAt?: string
+  /** Origin of the listing — set when saving an imported draft. */
+  source?: NewOpeningPayload["source"]
   icon?: ReactNode
   criteria?: NewCriterionInput[]
 }
 
-const seed: Array<Omit<Opening, "url">> = [
-  {
-    id: "senior-frontend-engineer",
-    title: "Senior Frontend Engineer",
-    icon: <CodeIcon />,
-    department: "Engineering",
-    location: "",
-    description:
-      "Owns the web client end to end: component architecture, state, performance.",
-    employmentType: "full_time",
-    workArrangement: "remote",
-    experienceLevel: "5+ years",
-    educationLevel: "Bachelor's degree or equivalent",
-    skills: ["React", "TypeScript", "Design systems"],
-    closesAt: "2026-10-15",
-    source: { type: "manual" },
-    status: "open",
-    criteria: [
-      {
-        id: "react-experience",
-        name: "React experience",
-        description: "3+ years building production React apps.",
-        weight: 5,
-        required: true,
-      },
-      {
-        id: "typescript-fluency",
-        name: "TypeScript fluency",
-        description: "Types non-trivial state and API contracts correctly.",
-        weight: 4,
-      },
-      {
-        id: "design-systems",
-        name: "Design systems",
-        description: "Has built or maintained a shared component library.",
-        weight: 2,
-        suggestedWeight: 3,
-        suggestionConfidence: 0.6,
-      },
-    ],
-    createdAt: "2026-09-21T09:00:00Z",
-    candidates: 5,
-    pendingReview: 1,
-  },
-  {
-    id: "backend-engineer",
-    title: "Backend Engineer",
-    icon: <ServerIcon />,
-    department: "Engineering",
-    location: "Berlin",
-    description:
-      "APIs and data pipelines behind the screening workflow.",
-    employmentType: "full_time",
-    workArrangement: "hybrid",
-    experienceLevel: "3+ years",
-    skills: ["Python", "FastAPI", "PostgreSQL"],
-    source: { type: "manual" },
-    status: "open",
-    criteria: [
-      {
-        id: "api-design",
-        name: "API design",
-        description: "Has designed and shipped a public REST or RPC API.",
-        weight: 4,
-        required: true,
-      },
-      {
-        id: "python",
-        name: "Python",
-        description: "Production Python, async experience a plus.",
-        weight: 3,
-      },
-    ],
-    createdAt: "2026-09-22T14:30:00Z",
-    candidates: 3,
-    pendingReview: 1,
-  },
-  {
-    id: "product-designer",
-    title: "Product Designer",
-    icon: <PenToolIcon />,
-    department: "Design",
-    location: "",
-    description: "Flows, prototypes, and UI craft for the screening surface.",
-    employmentType: "contract",
-    workArrangement: "remote",
-    experienceLevel: "4+ years",
-    skills: ["Figma", "Prototyping", "B2B UI"],
-    source: {
-      type: "link",
-      url: "https://www.linkedin.com/jobs/view/example",
-    },
-    status: "open",
-    criteria: [
-      {
-        id: "portfolio",
-        name: "Relevant portfolio",
-        description: "Shipped B2B or data-dense product UI.",
-        weight: 5,
-      },
-    ],
-    createdAt: "2026-09-24T10:15:00Z",
-    candidates: 4,
-    pendingReview: 1,
-  },
-  {
-    id: "data-scientist",
-    title: "Data Scientist",
-    icon: <ChartColumnIcon />,
-    department: "Data",
-    location: "London",
-    description: "Scoring methodology, evaluation harnesses, error analysis.",
-    employmentType: "full_time",
-    workArrangement: "onsite",
-    experienceLevel: "2+ years",
-    skills: ["Python", "Statistics", "ML evaluation"],
-    source: { type: "manual" },
-    status: "draft",
-    criteria: [],
-    createdAt: "2026-09-26T16:45:00Z",
-    candidates: 0,
-    pendingReview: 0,
-  },
-  {
-    id: "engineering-manager",
-    title: "Engineering Manager",
-    icon: <UsersIcon />,
-    department: "Engineering",
-    location: "Berlin",
-    description: "Leads the screening team; hiring and delivery ownership.",
-    employmentType: "full_time",
-    workArrangement: "hybrid",
-    experienceLevel: "7+ years",
-    skills: ["Leadership", "Hiring", "Delivery"],
-    source: {
-      type: "file",
-      filename: "em-role.pdf",
-    },
-    status: "open",
-    criteria: [],
-    createdAt: "2026-09-27T08:20:00Z",
-    candidates: 2,
-    pendingReview: 0,
-  },
-]
+// ---------- store ----------
 
-let openings: Opening[] = seed.map((o) => ({
-  ...o,
-  url: `/openings/${o.id}`,
-}))
+let openings: Opening[] = []
+let loaded = false
+let inflight: Promise<void> | null = null
 
 const listeners = new Set<() => void>()
 
+function emit() {
+  listeners.forEach((l) => l())
+}
+
 function subscribe(callback: () => void) {
   listeners.add(callback)
+  if (!loaded) void refreshOpenings()
   return () => {
     listeners.delete(callback)
   }
@@ -241,7 +111,43 @@ export function getOpening(id: string | undefined): Opening | undefined {
   return openings.find((o) => o.id === id)
 }
 
-function slugify(title: string): string {
+function iconFor(opening: OpeningModel): ReactNode {
+  const haystack = `${opening.title} ${opening.department}`.toLowerCase()
+  if (haystack.includes("design")) return <PenToolIcon />
+  if (haystack.includes("data") || haystack.includes("scientist"))
+    return <ChartColumnIcon />
+  if (haystack.includes("manag") || haystack.includes("lead"))
+    return <UsersIcon />
+  if (haystack.includes("backend") || haystack.includes("server"))
+    return <ServerIcon />
+  if (haystack.includes("engineer") || haystack.includes("develop"))
+    return <CodeIcon />
+  return <BriefcaseIcon />
+}
+
+function decorate(opening: OpeningModel): Opening {
+  return {
+    ...opening,
+    url: `/openings/${opening.id}`,
+    icon: iconFor(opening),
+  }
+}
+
+export async function refreshOpenings(): Promise<void> {
+  inflight ??= openingsApi
+    .list()
+    .then((list) => {
+      openings = list.map(decorate)
+      loaded = true
+      emit()
+    })
+    .finally(() => {
+      inflight = null
+    })
+  return inflight
+}
+
+export function slugify(title: string): string {
   return (
     title
       .toLowerCase()
@@ -258,81 +164,83 @@ function buildCriteria(input: NewOpeningInput["criteria"]) {
     .map((c) => {
       let criterionId = slugify(c.name)
       let i = 2
-      while (criterionIds.has(criterionId)) criterionId = `${slugify(c.name)}-${i++}`
+      while (criterionIds.has(criterionId))
+        criterionId = `${slugify(c.name)}-${i++}`
       criterionIds.add(criterionId)
+      const weight = c.weight ?? c.suggestedWeight ?? 3
       return {
         id: criterionId,
         name: c.name.trim(),
-        description: "",
-        weight: Math.min(5, Math.max(1, Math.round(c.weight))),
+        description: c.description ?? "",
+        weight: Math.min(5, Math.max(1, Math.round(weight))),
         required: c.required,
+        suggestedWeight: c.suggestedWeight,
+        suggestionConfidence: c.suggestionConfidence,
       }
     })
 }
 
-export function addOpening(input: NewOpeningInput): Opening {
-  let id = slugify(input.title)
-  let suffix = 2
-  while (getOpening(id)) id = `${slugify(input.title)}-${suffix++}`
-
-  const criteria = buildCriteria(input.criteria)
-
-  const opening: Opening = {
-    id,
+function toPayload(input: NewOpeningInput): NewOpeningPayload {
+  return {
     title: input.title.trim(),
-    url: `/openings/${id}`,
-    icon: input.icon ?? <BriefcaseIcon />,
-    department: input.department?.trim() ?? "",
-    location: input.location?.trim() ?? "",
-    description: input.description?.trim() ?? "",
+    department: input.department?.trim() || undefined,
+    location: input.location?.trim() || undefined,
+    description: input.description?.trim() || undefined,
     employmentType: input.employmentType,
     workArrangement: input.workArrangement,
     experienceLevel: input.experienceLevel?.trim() || undefined,
     educationLevel: input.educationLevel?.trim() || undefined,
     skills: input.skills?.length ? input.skills : undefined,
     closesAt: input.closesAt,
-    source: { type: "manual" },
-    status: "open",
-    criteria,
-    createdAt: new Date().toISOString(),
-    candidates: 0,
-    pendingReview: 0,
+    source: input.source ?? { type: "manual" },
+    criteria: buildCriteria(input.criteria),
   }
-  openings = [...openings, opening]
-  listeners.forEach((l) => l())
-  return opening
 }
 
-export function adjustCandidateCount(openingId: string, delta: number) {
-  openings = openings.map((o) =>
-    o.id === openingId ? { ...o, candidates: o.candidates + delta } : o,
-  )
-  listeners.forEach((l) => l())
+export async function addOpening(input: NewOpeningInput): Promise<Opening> {
+  const created = await openingsApi.create(toPayload(input))
+  await refreshOpenings()
+  return decorate(created)
 }
 
-export function updateOpening(
+export async function updateOpening(
   id: string,
   input: NewOpeningInput,
-): Opening | undefined {
-  const existing = getOpening(id)
-  if (!existing) return undefined
+): Promise<void> {
+  await openingsApi.update(id, toPayload(input))
+  await refreshOpenings()
+}
 
-  const updated: Opening = {
-    ...existing,
-    title: input.title.trim(),
-    department: input.department?.trim() ?? "",
-    location: input.location?.trim() ?? "",
-    description: input.description?.trim() ?? "",
-    employmentType: input.employmentType,
-    workArrangement: input.workArrangement,
-    experienceLevel: input.experienceLevel?.trim() || undefined,
-    educationLevel: input.educationLevel?.trim() || undefined,
-    skills: input.skills?.length ? input.skills : undefined,
-    closesAt: input.closesAt,
-    criteria: buildCriteria(input.criteria),
-    updatedAt: new Date().toISOString(),
-  }
-  openings = openings.map((o) => (o.id === id ? updated : o))
-  listeners.forEach((l) => l())
-  return updated
+// ---------- skill -> criteria suggestions ----------
+
+/**
+ * Merge Jev skill suggestions into the form's criteria list — appends new
+ * criteria for skills that matched nothing, skipping names already present.
+ */
+export function mergeSuggestions(
+  criteria: NewCriterionInput[],
+  suggestions: SkillSuggestion[],
+): NewCriterionInput[] {
+  const names = new Set(
+    criteria.map((c) => c.name.trim().toLowerCase()),
+  )
+  const additions = suggestions
+    .filter((s) => s.matchedCriterionId == null && s.criterion != null)
+    .filter((s) => !names.has(s.criterion!.name.trim().toLowerCase()))
+    .map((s) => ({
+      name: s.criterion!.name,
+      description: s.criterion!.description,
+      weight: s.criterion!.suggestedWeight,
+      required: s.criterion!.required,
+      suggestedWeight: s.criterion!.suggestedWeight,
+      suggestionConfidence: s.criterion!.confidence,
+    }))
+  return additions.length ? [...criteria, ...additions] : criteria
+}
+
+/** Test hook — clears the cache between tests. */
+export function __resetOpeningsForTests() {
+  openings = []
+  loaded = false
+  inflight = null
 }

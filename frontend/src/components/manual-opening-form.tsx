@@ -1,9 +1,12 @@
-import { useState } from "react"
-import { PlusIcon, XIcon } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
+import { LoaderCircleIcon, PlusIcon, XIcon } from "lucide-react"
 
+import { openingsApi } from "@/lib/api"
 import {
   addOpening,
   EMPLOYMENT_TYPE_LABELS,
+  mergeSuggestions,
+  slugify,
   WORK_ARRANGEMENT_LABELS,
   type NewCriterionInput,
   type NewOpeningInput,
@@ -37,7 +40,7 @@ export function ManualOpeningForm({
   /** Pre-filled draft, e.g. fields extracted from an imported listing. */
   initial?: Partial<NewOpeningInput>
   /** Where the entered data goes — addOpening by default, updateOpening when editing. */
-  onSubmit?: (input: NewOpeningInput) => void
+  onSubmit?: (input: NewOpeningInput) => void | Promise<unknown>
   submitLabel?: string
 }) {
   const [title, setTitle] = useState(initial?.title ?? "")
@@ -60,31 +63,115 @@ export function ManualOpeningForm({
   const [criteria, setCriteria] = useState<NewCriterionInput[]>(
     initial?.criteria ?? [],
   )
+  const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
 
   const setCriterion = (index: number, patch: Partial<NewCriterionInput>) =>
     setCriteria((prev) =>
       prev.map((c, i) => (i === index ? { ...c, ...patch } : c)),
     )
 
-  const submit = (event: React.FormEvent) => {
+  // Debounced Jev classification: pause typing 600ms → classify new skills
+  // against the filled role context and append suggested criteria.
+  const suggestedRef = useRef<Set<string>>(
+    new Set(
+      [
+        ...(initial?.skills ?? []),
+        ...(initial?.criteria ?? []).map((c) => c.name),
+      ].map((s) => s.trim().toLowerCase()),
+    ),
+  )
+  const skillsRef = useRef(skills)
+  skillsRef.current = skills
+  const criteriaRef = useRef(criteria)
+  criteriaRef.current = criteria
+
+  useEffect(() => {
+    const parsed = skills
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const pending = parsed.filter(
+      (s) => !suggestedRef.current.has(s.toLowerCase()),
+    )
+    if (!pending.length) return
+    const timer = setTimeout(() => {
+      const stillPending = pending.filter(
+        (s) => !suggestedRef.current.has(s.toLowerCase()),
+      )
+      stillPending.forEach((s) =>
+        suggestedRef.current.add(s.toLowerCase()),
+      )
+      if (!stillPending.length) return
+      openingsApi
+        .suggestCriteria({
+          title: title.trim() || undefined,
+          department: department.trim() || undefined,
+          location: location.trim() || undefined,
+          employmentType,
+          workArrangement,
+          experienceLevel: experienceLevel.trim() || undefined,
+          educationLevel: educationLevel.trim() || undefined,
+          description: description.trim() || undefined,
+          skills: stillPending,
+          existingCriteria: criteriaRef.current
+            .filter((c) => c.name.trim())
+            .map((c) => ({
+              id: slugify(c.name),
+              name: c.name.trim(),
+            })),
+        })
+        .then((response) => {
+          const current = new Set(
+            skillsRef.current
+              .split(",")
+              .map((s) => s.trim().toLowerCase())
+              .filter(Boolean),
+          )
+          const fresh = response.suggestions.filter((s) =>
+            current.has(s.skill.trim().toLowerCase()),
+          )
+          if (!fresh.length) return
+          setCriteria((prev) => mergeSuggestions(prev, fresh))
+        })
+        .catch(() => {
+          // Suggestions are best-effort — typing must never block on Jev.
+        })
+    }, 600)
+    return () => clearTimeout(timer)
+    // Suggestion context is read from refs so a paused keystroke fires once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [skills])
+
+  const submit = async (event: React.FormEvent) => {
     event.preventDefault()
-    if (!title.trim()) return
-    onSubmit({
-      title,
-      department,
-      location,
-      description,
-      employmentType,
-      workArrangement,
-      experienceLevel,
-      educationLevel,
-      skills: skills
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean),
-      criteria,
-    })
-    onDone()
+    if (!title.trim() || submitting) return
+    setSubmitting(true)
+    setSubmitError(null)
+    try {
+      await onSubmit({
+        title,
+        department,
+        location,
+        description,
+        employmentType,
+        workArrangement,
+        experienceLevel,
+        educationLevel,
+        skills: skills
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+        criteria,
+      })
+      onDone()
+    } catch (error) {
+      setSubmitError(
+        error instanceof Error ? error.message : "Could not save the opening.",
+      )
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -277,8 +364,12 @@ export function ManualOpeningForm({
           </div>
         </Field>
 
+        {submitError && (
+          <p className="text-xs text-destructive">{submitError}</p>
+        )}
         <Field>
-          <Button type="submit" disabled={!title.trim()}>
+          <Button type="submit" disabled={!title.trim() || submitting}>
+            {submitting && <LoaderCircleIcon className="animate-spin" />}
             {submitLabel}
           </Button>
         </Field>
