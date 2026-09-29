@@ -13,6 +13,11 @@ services:
       WORKER_COUNT: ${WORKER_COUNT:-4}
       REVIEW_CONFIDENCE_THRESHOLD: ${REVIEW_CONFIDENCE_THRESHOLD:-0.5}
       SMARTCV_ACCOUNTS: ${SMARTCV_ACCOUNTS:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-6-luna}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      SMARTCV_FAKE_IMPORTER: ${SMARTCV_FAKE_IMPORTER:-false}
     volumes:
       - smartcv-data:/app/backend/data
     restart: unless-stopped

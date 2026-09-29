@@ -19,6 +19,17 @@ class Settings(BaseSettings):
     typesafe_api_key: SecretStr | None = None
     typesafe_model: str = "jev"
     smartcv_fake_evaluator: bool = False
+    # Listing import agent (LangGraph + OpenRouter). Optional: endpoints
+    # return 503 when neither a key nor the fake importer is configured.
+    openrouter_api_key: SecretStr | None = None
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "openai/gpt-6-luna"
+    tavily_api_key: SecretStr | None = None
+    smartcv_fake_importer: bool = False
+    import_fetch_timeout: float = 15.0
+    import_llm_timeout: float = 90.0
+    import_max_chars: int = 40_000
+    import_min_source_chars: int = 800
     # JSON map of username -> password, e.g. {"recruiter": "s3cret"}.
     # Empty disables the demo gate entirely.
     smartcv_accounts: str = ""
