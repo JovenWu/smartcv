@@ -3,9 +3,10 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
+from backend.app.auth import require_session
 from backend.app.documents import UnsupportedFile, validate_upload
 from backend.app.schemas import (
     BatchUploadResponse,
@@ -18,7 +19,7 @@ from backend.app.schemas import (
     WeightSuggestionResponse,
 )
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api", dependencies=[Depends(require_session)])
 
 _MATCH_LEVEL_FRACTION = {"not_found": 0.0, "partial": 0.5, "strong": 1.0}
 _CHUNK_SIZE = 1 << 20

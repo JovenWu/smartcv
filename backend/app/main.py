@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api import router as api_router
+from backend.app.auth import SessionStore, auth_router
 from backend.app.config import Settings, get_settings
 from backend.app.database import SQLiteRepository
 from backend.app.events import EventHub, EventPublisher
@@ -22,6 +23,7 @@ def create_app(settings: Settings | None = None, evaluator=None) -> FastAPI:
     app = FastAPI(title="SmartCV")
     app.state.settings = settings
     app.state.evaluator_override = evaluator
+    app.state.sessions = SessionStore()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -63,12 +65,14 @@ def create_app(settings: Settings | None = None, evaluator=None) -> FastAPI:
         allow_origins=_LOCAL_ORIGINS,
         allow_methods=["*"],
         allow_headers=["*"],
+        allow_credentials=True,
     )
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    app.include_router(auth_router)
     app.include_router(api_router)
     return app
 

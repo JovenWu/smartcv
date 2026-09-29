@@ -1,3 +1,4 @@
+import json
 from functools import lru_cache
 from pathlib import Path
 
@@ -18,12 +19,36 @@ class Settings(BaseSettings):
     typesafe_api_key: SecretStr | None = None
     typesafe_model: str = "jev"
     smartcv_fake_evaluator: bool = False
+    # JSON map of username -> password, e.g. {"recruiter": "s3cret"}.
+    # Empty disables the demo gate entirely.
+    smartcv_accounts: str = ""
     max_batch_files: int = 200
     max_file_bytes: int = 10_000_000
     worker_count: int = Field(default=4, ge=1)
     review_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     data_dir: Path = DEFAULT_DATA_DIR
     database_path: Path = DEFAULT_DATA_DIR / "smartcv.sqlite3"
+
+    @property
+    def demo_accounts(self) -> dict[str, str]:
+        raw = self.smartcv_accounts.strip()
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "SMARTCV_ACCOUNTS must be a JSON object like "
+                '{"username": "password"}'
+            ) from exc
+        if not isinstance(data, dict) or not all(
+            isinstance(k, str) and isinstance(v, str)
+            for k, v in data.items()
+        ):
+            raise ValueError(
+                "SMARTCV_ACCOUNTS must map usernames to passwords"
+            )
+        return data
 
     @property
     def uploads_dir(self) -> Path:

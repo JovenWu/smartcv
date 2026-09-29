@@ -77,6 +77,12 @@ export interface BatchUploadResponse {
   total_count: number;
 }
 
+export interface SessionInfo {
+  auth_required: boolean;
+  authenticated: boolean;
+  username: string | null;
+}
+
 export const MAX_BATCH_FILES = 200;
 export const MAX_FILE_BYTES = 10_000_000;
 export const ACCEPTED_EXTENSIONS = [".pdf", ".docx"] as const;

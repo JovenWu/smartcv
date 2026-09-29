@@ -71,12 +71,19 @@ const doneCandidate: CandidateResult = {
   ],
 };
 
+const OPEN_SESSION = {
+  auth_required: false,
+  authenticated: true,
+  username: null,
+};
+
 function route(url: string, init?: RequestInit): Response {
   const json = (payload: unknown, status = 200) =>
     new Response(JSON.stringify(payload), {
       status,
       headers: { "Content-Type": "application/json" },
     });
+  if (url === "/api/auth/session") return json(OPEN_SESSION);
   if (url === "/api/jobs" && init?.method === "POST")
     return json(snapshot, 201);
   if (url === "/api/jobs/job-1/cvs")
@@ -110,7 +117,10 @@ describe("App", () => {
     render(<App />);
 
     // 1. Define the role with a confirmed weight.
-    await user.type(screen.getByLabelText(/role title/i), "Backend Engineer");
+    await user.type(
+      await screen.findByLabelText(/role title/i),
+      "Backend Engineer",
+    );
     await user.type(screen.getByLabelText(/criterion name/i), "Python");
     await user.type(screen.getByLabelText(/weight \(1–5\)/i), "4");
     await user.click(
@@ -171,14 +181,52 @@ describe("App", () => {
     expect(source.closed).toBe(true);
   });
 
-  it("keeps upload available only inside an active job", () => {
+  it("keeps upload available only inside an active job", async () => {
     render(<App />);
+    expect(
+      await screen.findByRole("button", { name: /confirm weights/i }),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /upload/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows the login gate when the session requires auth", async () => {
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/auth/session") {
+        return new Response(
+          JSON.stringify({
+            auth_required: true,
+            authenticated: false,
+            username: null,
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url === "/api/auth/login")
+        return new Response(null, { status: 204 });
+      return route(url, init);
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
     expect(
-      screen.getByRole("button", { name: /confirm weights/i }),
+      await screen.findByRole("button", { name: /sign in/i }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /confirm weights/i }),
+    ).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/username/i), "recruiter");
+    await user.type(screen.getByLabelText(/password/i), "s3cret");
+    await user.click(screen.getByRole("button", { name: /sign in/i }));
+
+    expect(
+      await screen.findByRole("button", { name: /confirm weights/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("recruiter")).toBeInTheDocument();
   });
 
   it("applies the stored theme to the document root", async () => {

@@ -6,8 +6,15 @@ import type {
   EvidenceSpan,
   JobSnapshot,
   ReviewMatchLevel,
+  SessionInfo,
   WeightSuggestionResponse,
 } from "@/types";
+
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  unauthorizedHandler = handler;
+}
 
 async function parseError(response: Response): Promise<Error> {
   let detail = `Request failed (${response.status})`;
@@ -22,6 +29,7 @@ async function parseError(response: Response): Promise<Error> {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
+  if (response.status === 401) unauthorizedHandler?.();
   if (!response.ok) throw await parseError(response);
   return (await response.json()) as T;
 }
@@ -64,8 +72,29 @@ export async function uploadCvs(
     method: "POST",
     body: form,
   });
+  if (response.status === 401) unauthorizedHandler?.();
   if (!response.ok) throw await parseError(response);
   return (await response.json()) as BatchUploadResponse;
+}
+
+export function getSession(): Promise<SessionInfo> {
+  return request<SessionInfo>("/api/auth/session");
+}
+
+export async function login(
+  username: string,
+  password: string,
+): Promise<void> {
+  const response = await fetch(
+    "/api/auth/login",
+    jsonInit("POST", { username, password }),
+  );
+  if (!response.ok) throw await parseError(response);
+}
+
+export async function logout(): Promise<void> {
+  const response = await fetch("/api/auth/logout", { method: "POST" });
+  if (!response.ok) throw await parseError(response);
 }
 
 export function getJob(jobId: string): Promise<JobSnapshot> {

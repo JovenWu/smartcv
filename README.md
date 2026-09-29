@@ -33,6 +33,22 @@ SMARTCV_FAKE_EVALUATOR=false TYPESAFE_API_KEY=<key> docker compose up --build
 
 Provider failures never fall back to fake scoring silently.
 
+### Demo gate (optional)
+
+Set `SMARTCV_ACCOUNTS` to a JSON map of usernames and passwords to put the
+whole API behind a login page:
+
+```bash
+SMARTCV_ACCOUNTS='{"recruiter": "s3cret", "guest": "demo123"}' docker compose up --build
+```
+
+or add the same line to `backend/.env`. Successful login sets an HttpOnly
+session cookie (12h, SameSite=Lax); every `/api/*` route — including the SSE
+stream and CV previews — returns 401 without it. Sessions are in-memory, so a
+container restart signs everyone out. Leave the variable unset/empty to run
+ungated for local dev and tests. This is demo-grade gating, not production
+authentication.
+
 Run the test suite inside the image:
 
 ```bash

@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
-import type { JobSnapshot } from "@/types";
+import {
+  getSession,
+  logout,
+  setUnauthorizedHandler,
+} from "@/api";
+import type { JobSnapshot, SessionInfo } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -11,10 +16,12 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import { RoleCriteriaForm } from "@/components/RoleCriteriaForm";
 import { CvUploadPanel } from "@/components/CvUploadPanel";
 import { Scorecard } from "@/components/Scorecard";
 import { EvidencePanel } from "@/components/EvidencePanel";
+import { LoginPage } from "@/components/LoginPage";
 import { useJobEvents } from "@/hooks/useJobEvents";
 
 type Theme = "system" | "light" | "dark";
@@ -57,11 +64,43 @@ function useTheme(): [Theme, () => void] {
 }
 
 export default function App() {
+  const [session, setSession] = useState<SessionInfo | null>(null);
+  const [bootError, setBootError] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
-  const { job, live, streamError, mergeCandidate, seedJob } =
-    useJobEvents(jobId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [theme, cycleTheme] = useTheme();
+
+  const gated =
+    session !== null && (!session.auth_required || session.authenticated);
+  const { job, live, streamError, mergeCandidate, seedJob } = useJobEvents(
+    gated ? jobId : null,
+  );
+
+  useEffect(() => {
+    getSession()
+      .then(setSession)
+      .catch(() => setBootError(true));
+  }, []);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() =>
+      setSession((prev) =>
+        prev?.auth_required
+          ? { ...prev, authenticated: false, username: null }
+          : prev,
+      ),
+    );
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  // If the stream drops while gated, the session may have expired —
+  // re-check it instead of spinning on "Reconnecting" forever.
+  useEffect(() => {
+    if (!streamError || !session?.auth_required) return;
+    getSession()
+      .then(setSession)
+      .catch(() => {});
+  }, [streamError, session?.auth_required]);
 
   const onJobCreated = useCallback(
     (created: JobSnapshot) => {
@@ -75,6 +114,71 @@ export default function App() {
     setJobId(null);
     setSelectedId(null);
   };
+
+  const signOut = async () => {
+    try {
+      await logout();
+    } finally {
+      setSession((prev) =>
+        prev
+          ? { ...prev, authenticated: false, username: null }
+          : prev,
+      );
+      setJobId(null);
+      setSelectedId(null);
+    }
+  };
+
+  if (bootError) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background px-4">
+        <Card className="w-full max-w-sm text-center">
+          <CardHeader>
+            <CardTitle>Backend unreachable</CardTitle>
+            <CardDescription>
+              SmartCV can’t reach the API. Start the backend
+              (docker compose up) and reload.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button onClick={() => window.location.reload()}>Reload</Button>
+          </CardContent>
+        </Card>
+      </main>
+    );
+  }
+
+  if (session === null) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background px-4">
+        <Card className="w-full max-w-sm">
+          <CardHeader>
+            <Skeleton className="h-5 w-32" />
+            <Skeleton className="h-3 w-48" />
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-24" />
+          </CardContent>
+        </Card>
+      </main>
+    );
+  }
+
+  if (session.auth_required && !session.authenticated) {
+    return (
+      <LoginPage
+        onAuthenticated={(username) =>
+          setSession({
+            auth_required: true,
+            authenticated: true,
+            username,
+          })
+        }
+      />
+    );
+  }
 
   const selected = job?.candidates.find((c) => c.id === selectedId) ?? null;
 
@@ -105,6 +209,16 @@ export default function App() {
                 )}
                 <Button variant="ghost" size="sm" onClick={reset}>
                   New role
+                </Button>
+              </>
+            )}
+            {session.auth_required && (
+              <>
+                <span className="hidden text-xs text-muted-foreground sm:inline">
+                  {session.username}
+                </span>
+                <Button variant="ghost" size="sm" onClick={signOut}>
+                  Sign out
                 </Button>
               </>
             )}

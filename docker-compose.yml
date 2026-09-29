@@ -12,6 +12,7 @@ services:
       TYPESAFE_MODEL: ${TYPESAFE_MODEL:-jev}
       WORKER_COUNT: ${WORKER_COUNT:-4}
       REVIEW_CONFIDENCE_THRESHOLD: ${REVIEW_CONFIDENCE_THRESHOLD:-0.5}
+      SMARTCV_ACCOUNTS: ${SMARTCV_ACCOUNTS:-}
     volumes:
       - smartcv-data:/app/backend/data
     restart: unless-stopped
