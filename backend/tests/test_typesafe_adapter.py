@@ -3,8 +3,10 @@ from types import SimpleNamespace
 import pytest
 
 from backend.app.schemas import (
+    CriteriaSuggestionRequest,
     Criterion,
     CriterionInput,
+    CriterionRef,
     EvidenceSpan,
     MatchStatus,
 )
@@ -35,22 +37,27 @@ def choice_answer(choice, confidence=0.9):
     return SimpleNamespace(choice=choice, confidence=confidence)
 
 
+def noul_answer(probability):
+    return SimpleNamespace(noul=probability)
+
+
 class FakeClient:
     """Records calls and returns canned answers keyed by question id."""
 
-    def __init__(self, scores=None, choices=None, error=None):
+    def __init__(self, scores=None, choices=None, nouls=None, error=None):
         self.scores = scores or {}
         self.choices = choices or {}
+        self.nouls = nouls or {}
         self.error = error
         self.calls = []
 
     async def system_one(self, state, questions):
-        from typesafe_sdk import Choice, Score
+        from typesafe_sdk import Choice, Noul, Score
 
         self.calls.append({"state": state, "questions": questions})
         if self.error is not None:
             raise self.error
-        scores, choices = {}, {}
+        scores, choices, nouls = {}, {}, {}
         for key, question in questions.items():
             if isinstance(question, Score):
                 scores[key] = self.scores.get(
@@ -58,7 +65,11 @@ class FakeClient:
                 )
             elif isinstance(question, Choice):
                 choices[key] = self.choices.get(key, choice_answer("no_match"))
-        return SimpleNamespace(scores=scores, choices=choices)
+            elif isinstance(question, Noul):
+                nouls[key] = self.nouls.get(key, noul_answer(0.5))
+        return SimpleNamespace(
+            scores=scores, choices=choices, nouls=nouls
+        )
 
 
 @pytest.fixture
@@ -177,6 +188,86 @@ async def test_request_contains_masked_spans_and_no_match_option(evaluator):
     choice_criteria = call["questions"]["evidence_python"].criteria
     assert "no_match" in choice_criteria
     assert "p1-b0" in choice_criteria
+
+
+async def test_suggest_criteria_maps_skill_to_existing_criterion():
+    client = FakeClient(
+        choices={"match_0": choice_answer("python")},
+        scores={"weight_0": score_answer({"0": 0, "1": 0, "2": 0, "3": 0, "4": 1})},
+        nouls={"required_0": noul_answer(0.9)},
+    )
+    evaluator = TypeSafeEvaluator(client=client, review_threshold=0.5)
+    request = CriteriaSuggestionRequest(
+        title="Backend Engineer",
+        skills=["Python"],
+        existing_criteria=[
+            CriterionRef(id="python", name="Python"),
+            CriterionRef(id="db", name="Databases"),
+        ],
+    )
+    suggestions = await evaluator.suggest_criteria(request)
+    assert len(suggestions) == 1
+    assert suggestions[0].skill == "Python"
+    assert suggestions[0].matched_criterion_id == "python"
+    assert suggestions[0].criterion is None
+
+
+async def test_suggest_criteria_proposes_new_criterion():
+    client = FakeClient(
+        choices={"match_0": choice_answer("new")},
+        scores={"weight_0": score_answer({"0": 0, "1": 0, "2": 0, "3": 0.9, "4": 0.1})},
+        nouls={"required_0": noul_answer(0.8)},
+    )
+    evaluator = TypeSafeEvaluator(client=client, review_threshold=0.5)
+    request = CriteriaSuggestionRequest(
+        title="Backend Engineer",
+        department="Engineering",
+        skills=["Kubernetes"],
+        existing_criteria=[CriterionRef(id="python", name="Python")],
+    )
+    suggestions = await evaluator.suggest_criteria(request)
+    assert len(suggestions) == 1
+    suggestion = suggestions[0]
+    assert suggestion.matched_criterion_id is None
+    criterion = suggestion.criterion
+    assert criterion is not None
+    assert criterion.name == "Kubernetes"
+    assert criterion.suggested_weight == 4
+    assert criterion.required is True
+    assert 0.0 <= criterion.confidence <= 1.0
+
+
+async def test_suggest_criteria_sends_role_context_in_state():
+    client = FakeClient()
+    evaluator = TypeSafeEvaluator(client=client, review_threshold=0.5)
+    request = CriteriaSuggestionRequest(
+        title="Backend Engineer",
+        department="Platform",
+        employment_type="full_time",
+        skills=["Go"],
+        existing_criteria=[CriterionRef(id="python", name="Python")],
+    )
+    await evaluator.suggest_criteria(request)
+    call = client.calls[0]
+    state = call["state"]
+    assert state["title"] == "Backend Engineer"
+    assert state["department"] == "Platform"
+    assert state["employment_type"] == "full_time"
+    assert state["existing_criteria"] == [{"id": "python", "name": "Python"}]
+    assert set(call["questions"]) == {"match_0", "weight_0", "required_0"}
+    match_criteria = call["questions"]["match_0"].criteria
+    assert "python" in match_criteria
+    assert "new" in match_criteria
+
+
+async def test_suggest_criteria_with_no_skills_returns_empty():
+    client = FakeClient()
+    evaluator = TypeSafeEvaluator(client=client, review_threshold=0.5)
+    suggestions = await evaluator.suggest_criteria(
+        CriteriaSuggestionRequest(title="Role", skills=[])
+    )
+    assert suggestions == []
+    assert client.calls == []
 
 
 async def test_service_error_becomes_retryable():

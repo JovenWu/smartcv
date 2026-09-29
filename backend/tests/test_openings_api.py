@@ -80,6 +80,22 @@ def test_create_opening_requires_title(client):
     assert client.post("/api/openings", json={}).status_code == 422
 
 
+def test_criteria_suggestions_endpoint(client):
+    response = client.post(
+        "/api/criteria-suggestions",
+        json={
+            "title": "Backend Engineer",
+            "skills": ["Kubernetes"],
+            "existingCriteria": [{"id": "python", "name": "Python"}],
+        },
+    )
+    assert response.status_code == 200
+    suggestions = response.json()["suggestions"]
+    assert len(suggestions) == 1
+    assert suggestions[0]["skill"] == "Kubernetes"
+    assert suggestions[0]["criterion"]["suggestedWeight"] >= 1
+
+
 def test_unknown_opening_404s(client):
     assert client.get("/api/openings/nope").status_code == 404
     assert client.patch("/api/openings/nope", json={"title": "x"}).status_code == 404

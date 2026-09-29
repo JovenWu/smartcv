@@ -1,15 +1,18 @@
 import re
 
-from typesafe_sdk import AsyncTypeSafeClient, Choice, Score
+from typesafe_sdk import AsyncTypeSafeClient, Choice, Noul, Score
 
 from backend.app.config import Settings
 from backend.app.documents import prepare_evaluation_spans
 from backend.app.schemas import (
+    CriteriaSuggestionRequest,
     Criterion,
     CriterionEvaluation,
     CriterionInput,
     EvidenceSpan,
     MatchStatus,
+    SkillSuggestion,
+    SuggestedCriterion,
     WeightSuggestion,
 )
 
@@ -147,6 +150,159 @@ class TypeSafeEvaluator:
                 f"Evaluation service request failed ({type(error).__name__})"
             ) from error
 
+    async def suggest_criteria(
+        self, request: CriteriaSuggestionRequest
+    ) -> list[SkillSuggestion]:
+        if not request.skills:
+            return []
+        existing = {
+            criterion.id: criterion.name
+            for criterion in request.existing_criteria
+        }
+        questions = {}
+        for index, skill in enumerate(request.skills):
+            questions[f"match_{index}"] = Choice(
+                instructions=(
+                    f"Does the skill '{skill}' already fall under one of "
+                    "the existing screening criteria? Choose 'new' if it "
+                    "needs its own criterion."
+                ),
+                criteria={
+                    **existing,
+                    "new": "The skill is not covered; propose a new criterion.",
+                },
+            )
+            questions[f"weight_{index}"] = Score(
+                instructions=(
+                    f"How important is the skill '{skill}' for success in "
+                    "this role? Judge only job-related importance."
+                ),
+                criteria=list(_WEIGHT_LEVELS),
+            )
+            questions[f"required_{index}"] = Noul(
+                instructions=(
+                    f"Is '{skill}' a hard requirement for this role — "
+                    "something a candidate must have rather than a nice-to-have?"
+                ),
+            )
+        state = {
+            "title": request.title,
+            "department": request.department,
+            "location": request.location,
+            "employment_type": request.employment_type,
+            "work_arrangement": request.work_arrangement,
+            "experience_level": request.experience_level,
+            "education_level": request.education_level,
+            "description": request.description,
+            "existing_criteria": [
+                {"id": c.id, "name": c.name}
+                for c in request.existing_criteria
+            ],
+        }
+        try:
+            result = await self.client.system_one(
+                state=state, questions=questions
+            )
+        except Exception as error:
+            raise RetryableEvaluationError(
+                f"Evaluation service request failed ({type(error).__name__})"
+            ) from error
+        suggestions = []
+        for index, skill in enumerate(request.skills):
+            match_answer = result.choices[f"match_{index}"]
+            matched = match_answer.choice
+            if matched != "new" and matched in existing:
+                suggestions.append(
+                    SkillSuggestion(
+                        skill=skill, matched_criterion_id=matched
+                    )
+                )
+                continue
+            score_answer = result.scores[f"weight_{index}"]
+            required_answer = result.nouls[f"required_{index}"]
+            required_probability = min(
+                1.0, max(0.0, required_answer.noul)
+            )
+            required = required_probability >= 0.5
+            confidence = min(
+                match_answer.confidence,
+                score_answer.confidence,
+                abs(required_probability - 0.5) * 2,
+            )
+            suggestions.append(
+                SkillSuggestion(
+                    skill=skill,
+                    criterion=SuggestedCriterion(
+                        name=skill,
+                        description=(
+                            f"Demonstrated proficiency in {skill} "
+                            "relevant to the role."
+                        ),
+                        suggested_weight=max(
+                            1,
+                            min(
+                                5,
+                                int(score_answer.score + 0.5) + 1,
+                            ),
+                        ),
+                        required=required,
+                        confidence=min(1.0, max(0.0, confidence)),
+                    ),
+                )
+            )
+        return suggestions
+
+    async def evaluate_candidate(
+        self, criteria: list[Criterion], spans: list[EvidenceSpan]
+    ) -> list[CriterionEvaluation]:
+        evaluation_spans = prepare_evaluation_spans(spans)
+        questions = {}
+        for criterion in criteria:
+            questions[f"score_{criterion.id}"] = Score(
+                instructions=(
+                    f"How strongly does the CV evidence meet this requirement: "
+                    f"{criterion.name} — {criterion.description}. Assess only "
+                    f"job-related evidence and ignore personal identity or "
+                    f"demographic characteristics."
+                ),
+                criteria=list(_MATCH_LEVELS),
+            )
+            questions[f"evidence_{criterion.id}"] = Choice(
+                instructions=(
+                    f"Which span best supports this requirement: "
+                    f"{criterion.name} — {criterion.description}. Choose "
+                    f"{NO_MATCH} if none does."
+                ),
+                criteria={
+                    **{
+                        span.id: f"Page {span.page_number}: {span.text}"
+                        for span in evaluation_spans
+                    },
+                    NO_MATCH: "No listed span supports the requirement.",
+                },
+            )
+        try:
+            result = await self.client.system_one(
+                state={
+                    "criteria": [
+                        {
+                            "id": criterion.id,
+                            "name": criterion.name,
+                            "description": criterion.description,
+                        }
+                        for criterion in criteria
+                    ],
+                    "spans": [
+                        span.model_dump(mode="json") for span in evaluation_spans
+                    ],
+                },
+                questions=questions,
+            )
+        except Exception as error:
+            raise RetryableEvaluationError(
+                f"Evaluation service request failed ({type(error).__name__})"
+            ) from error
+
         source_by_id = {span.id: span for span in spans}
         evaluations = []
         for criterion in criteria:
@@ -206,6 +362,49 @@ class FakeEvaluator:
             )
             for criterion in criteria
         ]
+
+    async def suggest_criteria(
+        self, request: CriteriaSuggestionRequest
+    ) -> list[SkillSuggestion]:
+        suggestions = []
+        for skill in request.skills:
+            needle = skill.lower()
+            matched = next(
+                (
+                    criterion.id
+                    for criterion in request.existing_criteria
+                    if needle in f"{criterion.id} {criterion.name}".lower()
+                    or any(
+                        word in needle
+                        for word in _WORD.findall(
+                            criterion.name.lower()
+                        )
+                        if word not in _STOPWORDS
+                    )
+                ),
+                None,
+            )
+            if matched is not None:
+                suggestions.append(
+                    SkillSuggestion(skill=skill, matched_criterion_id=matched)
+                )
+            else:
+                suggestions.append(
+                    SkillSuggestion(
+                        skill=skill,
+                        criterion=SuggestedCriterion(
+                            name=skill,
+                            description=(
+                                f"Demonstrated proficiency in {skill} "
+                                "relevant to the role."
+                            ),
+                            suggested_weight=3,
+                            required=False,
+                            confidence=1.0,
+                        ),
+                    )
+                )
+        return suggestions
 
     async def evaluate_candidate(
         self, criteria: list[Criterion], spans: list[EvidenceSpan]
