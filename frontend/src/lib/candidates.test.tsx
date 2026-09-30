@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   addCandidates,
+  orderCandidates,
   setDecision,
+  sortCandidates,
   useCandidates,
   __resetCandidatesForTests,
 } from "@/lib/candidates"
@@ -148,7 +150,11 @@ describe("useCandidates", () => {
       const url = String(input)
       if (init?.method === "POST" && url.endsWith("/candidates")) {
         return new Response(
-          JSON.stringify({ candidates: [CANDIDATE], totalCount: 1 }),
+          JSON.stringify({
+            candidates: [CANDIDATE],
+            duplicates: [],
+            totalCount: 1,
+          }),
           { status: 201 },
         )
       }
@@ -184,7 +190,11 @@ describe("addCandidates", () => {
       const url = String(input)
       if (init?.method === "POST" && url.endsWith("/candidates")) {
         return new Response(
-          JSON.stringify({ candidates: [upload], totalCount: 1 }),
+          JSON.stringify({
+            candidates: [upload],
+            duplicates: [],
+            totalCount: 1,
+          }),
           { status: 201 },
         )
       }
@@ -202,6 +212,151 @@ describe("addCandidates", () => {
     })
     expect(result.current).toHaveLength(1)
     expect(result.current[0].status).toBe("queued")
+  })
+})
+
+describe("sortCandidates", () => {
+  const scored = (
+    id: string,
+    totalScore: number | null,
+    uploadOrder: number,
+    extra?: Partial<Candidate>,
+  ): Candidate => ({
+    ...CANDIDATE,
+    id,
+    totalScore,
+    uploadOrder,
+    ...extra,
+  })
+
+  it("orders by score descending, unscored last", () => {
+    const list = [
+      scored("low", 40, 0),
+      scored("unscored", null, 1),
+      scored("high", 90, 2),
+    ]
+    expect(
+      sortCandidates(list, { column: "score", dir: "desc" }).map(
+        (c) => c.id,
+      ),
+    ).toEqual(["high", "low", "unscored"])
+  })
+
+  it("orders by name ascending and descending", () => {
+    const list = [
+      scored("b", 10, 0, { name: "Beta" }),
+      scored("a", 90, 1, { name: "alpha" }),
+      scored("c", 50, 2, { name: "Gamma" }),
+    ]
+    expect(
+      sortCandidates(list, { column: "name", dir: "asc" }).map(
+        (c) => c.id,
+      ),
+    ).toEqual(["a", "b", "c"])
+    expect(
+      sortCandidates(list, { column: "name", dir: "desc" }).map(
+        (c) => c.id,
+      ),
+    ).toEqual(["c", "b", "a"])
+  })
+
+  it("orders by a criterion column using the effective fraction", () => {
+    const list = [
+      scored("weak", 10, 0, {
+        evaluations: [
+          {
+            criterionId: "python",
+            status: "partial",
+            confidence: 0.9,
+            modelFraction: 0.5,
+            evidenceSpanIds: [],
+          },
+        ],
+      }),
+      scored("reviewed", 50, 1, {
+        evaluations: [
+          {
+            criterionId: "python",
+            status: "reviewed",
+            confidence: 0.4,
+            modelFraction: 0.0,
+            manualFraction: 1.0,
+            evidenceSpanIds: [],
+          },
+        ],
+      }),
+      scored("none", 0, 2),
+    ]
+    // manualFraction (1.0) beats modelFraction (0.5); missing sinks.
+    expect(
+      sortCandidates(list, { column: "python", dir: "desc" }).map(
+        (c) => c.id,
+      ),
+    ).toEqual(["reviewed", "weak", "none"])
+    // Missing values sink even ascending.
+    expect(
+      sortCandidates(list, { column: "python", dir: "asc" }).map(
+        (c) => c.id,
+      ),
+    ).toEqual(["weak", "reviewed", "none"])
+  })
+
+  it("breaks ties by upload order", () => {
+    const list = [scored("b", 50, 1), scored("a", 50, 0)]
+    expect(
+      sortCandidates(list, { column: "score", dir: "desc" }).map(
+        (c) => c.id,
+      ),
+    ).toEqual(["a", "b"])
+  })
+})
+
+describe("orderCandidates", () => {
+  const candidate = (
+    id: string,
+    status: Candidate["status"],
+    totalScore: number | null,
+    uploadOrder: number,
+    extra?: Partial<Candidate>,
+  ): Candidate => ({
+    ...CANDIDATE,
+    id,
+    status,
+    totalScore,
+    uploadOrder,
+    ...extra,
+  })
+
+  it("pins in-flight candidates to the top under the default sort", () => {
+    const list = [
+      candidate("low", "complete", 40, 0),
+      candidate("high", "complete", 90, 1),
+      candidate("new-1", "queued", null, 2),
+      candidate("new-2", "evaluating", null, 3),
+    ]
+    expect(
+      orderCandidates(list, { column: "score", dir: "desc" }).map(
+        (c) => c.id,
+      ),
+    ).toEqual(["new-1", "new-2", "high", "low"])
+  })
+
+  it("does not pin when the user sorts by another column or direction", () => {
+    const list = [
+      candidate("low", "complete", 40, 0, { name: "Zed" }),
+      candidate("new", "queued", null, 1, { name: "Ann" }),
+    ]
+    expect(
+      orderCandidates(list, { column: "name", dir: "asc" }).map(
+        (c) => c.id,
+      ),
+    ).toEqual(["new", "low"])
+    // Score ascending follows sort rules: unscored still sink.
+    expect(
+      orderCandidates(list, { column: "score", dir: "asc" }).map(
+        (c) => c.id,
+      ),
+    ).toEqual(["low", "new"])
   })
 })
 

@@ -44,7 +44,7 @@ export default function OpeningsPage() {
   const [newOpeningOpen, setNewOpeningOpen] = useState(false)
 
   return (
-    <div className="flex flex-1 flex-col gap-4 p-4 pt-0">
+    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 pt-0">
       {status === "loading" && (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
           <SkeletonCard />

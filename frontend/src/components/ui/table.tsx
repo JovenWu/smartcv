@@ -1,11 +1,21 @@
 import * as React from "react"
 import { cn } from "cn"
 
-function Table({ className, ...props }: React.ComponentProps<"table">) {
+function Table({
+  className,
+  containerProps,
+  ...props
+}: React.ComponentProps<"table"> & {
+  containerProps?: React.ComponentProps<"div">
+}) {
   return (
     <div
       data-slot="table-container"
-      className="relative h-full w-full overflow-auto"
+      {...containerProps}
+      className={cn(
+        "relative h-full w-full overflow-auto",
+        containerProps?.className,
+      )}
     >
       <table
         data-slot="table"
@@ -65,6 +75,7 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
 function TableHead({ className, ...props }: React.ComponentProps<"th">) {
   return (
     <th
+      scope="col"
       data-slot="table-head"
       className={cn(
         "h-10 px-2 text-left align-middle font-medium whitespace-nowrap text-foreground [&:has([role=checkbox])]:pr-0",

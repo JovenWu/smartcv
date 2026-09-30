@@ -2,7 +2,7 @@ import { useMemo, useSyncExternalStore } from "react"
 
 import { apiFetch } from "@/lib/api"
 import { refreshOpenings } from "@/lib/openings"
-import type { Candidate, CandidateDecision } from "@/types"
+import type { Candidate, CandidateDecision, CandidateStatus } from "@/types"
 
 /**
  * Per-opening candidate cache fed by GET + SSE. Each opening id keeps its
@@ -32,14 +32,72 @@ function entryFor(openingId: string): CacheEntry {
   return entry
 }
 
-function rankCandidates(list: Candidate[]): Candidate[] {
-  // Score descending; unscored (queued/processing/failed) sink to the
-  // bottom. uploadOrder breaks ties so rows never jitter on equal scores.
-  return [...list].sort(
-    (a, b) =>
-      (b.totalScore ?? -1) - (a.totalScore ?? -1) ||
-      a.uploadOrder - b.uploadOrder,
+export type CandidateSort = {
+  /** "name", "score", or a criterion id. */
+  column: string
+  dir: "asc" | "desc"
+}
+
+export const IN_FLIGHT_STATUSES: ReadonlySet<CandidateStatus> = new Set([
+  "queued",
+  "extracting",
+  "evaluating",
+])
+
+function sortValue(
+  candidate: Candidate,
+  column: string,
+): number | string | null {
+  if (column === "name") return candidate.name.toLowerCase()
+  if (column === "score") return candidate.totalScore
+  const evaluation = candidate.evaluations.find(
+    (e) => e.criterionId === column,
   )
+  if (!evaluation) return null
+  return evaluation.manualFraction ?? evaluation.modelFraction
+}
+
+export function sortCandidates(
+  list: Candidate[],
+  sort: CandidateSort,
+): Candidate[] {
+  // Missing values (unscored, no evaluation) always sink to the bottom,
+  // whichever direction. uploadOrder breaks ties so rows never jitter.
+  const sign = sort.dir === "asc" ? 1 : -1
+  return [...list].sort((a, b) => {
+    const av = sortValue(a, sort.column)
+    const bv = sortValue(b, sort.column)
+    if (av == null && bv == null) return a.uploadOrder - b.uploadOrder
+    if (av == null) return 1
+    if (bv == null) return -1
+    const cmp =
+      typeof av === "string"
+        ? av.localeCompare(bv as string)
+        : av - (bv as number)
+    return cmp * sign || a.uploadOrder - b.uploadOrder
+  })
+}
+
+function rankCandidates(list: Candidate[]): Candidate[] {
+  return sortCandidates(list, { column: "score", dir: "desc" })
+}
+
+/**
+ * Display order for the scorecard: under the default score-desc view,
+ * in-flight candidates pin to the top so active work stays visible; they
+ * glide into ranked position as scores land. Any user-chosen sort applies
+ * literally.
+ */
+export function orderCandidates(
+  list: Candidate[],
+  sort: CandidateSort,
+): Candidate[] {
+  const sorted = sortCandidates(list, sort)
+  if (sort.column !== "score" || sort.dir !== "desc") return sorted
+  const active = sorted.filter((c) => IN_FLIGHT_STATUSES.has(c.status))
+  if (active.length === 0) return sorted
+  const rest = sorted.filter((c) => !IN_FLIGHT_STATUSES.has(c.status))
+  return [...active, ...rest]
 }
 
 function setList(openingId: string, list: Candidate[]) {
@@ -158,15 +216,27 @@ export function useCandidates(openingId: string | undefined): Candidate[] {
   )
 }
 
-interface BatchUploadResponse {
+export interface BatchUploadResponse {
   candidates: Candidate[]
+  /** Same-bytes files already in this opening — skipped, row unchanged. */
+  duplicates: Candidate[]
   totalCount: number
+}
+
+export function duplicateNotice(
+  result: BatchUploadResponse,
+): string | null {
+  const names = result.duplicates.map((d) => d.file.filename)
+  if (!names.length) return null
+  const shown = names.slice(0, 3).join(", ")
+  const extra = names.length > 3 ? ` and ${names.length - 3} more` : ""
+  return `${names.length} already in this opening, skipped: ${shown}${extra}`
 }
 
 export async function addCandidates(
   openingId: string,
   files: File[],
-): Promise<void> {
+): Promise<BatchUploadResponse> {
   const form = new FormData()
   files.forEach((file) => form.append("files", file))
   const response = await apiFetch<BatchUploadResponse>(
@@ -174,10 +244,12 @@ export async function addCandidates(
     { method: "POST", body: form },
   )
   response.candidates.forEach((candidate) => upsert(openingId, candidate))
+  response.duplicates.forEach((candidate) => upsert(openingId, candidate))
   // If a previous batch closed the stream via opening.complete, reopen it
   // so the new uploads stream their updates live.
   ensureStream(openingId)
   await refreshOpenings()
+  return response
 }
 
 export async function reviewCriterion(

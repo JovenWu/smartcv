@@ -1,6 +1,6 @@
 import { useState } from "react"
 
-import { addCandidates } from "@/lib/candidates"
+import { addCandidates, duplicateNotice } from "@/lib/candidates"
 import { FileDropzone } from "@/components/file-dropzone"
 import {
   Dialog,
@@ -20,9 +20,20 @@ export function AddCandidatesDialog({
   onOpenChange: (open: boolean) => void
 }) {
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        onOpenChange(next)
+        if (next) {
+          setError(null)
+          setNotice(null)
+        }
+      }}
+    >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Add CVs</DialogTitle>
@@ -34,12 +45,22 @@ export function AddCandidatesDialog({
         <FileDropzone
           multiple
           accept=".pdf,.docx"
-          title="Drop CVs here"
+          className={busy ? "pointer-events-none" : undefined}
+          title={busy ? "Uploading…" : "Drop CVs here"}
           hint="PDF or DOCX · multiple files · or click to browse"
           onFiles={(files) => {
             setError(null)
+            setNotice(null)
+            setBusy(true)
             addCandidates(openingId, files)
-              .then(() => onOpenChange(false))
+              .then((result) => {
+                const skipped = duplicateNotice(result)
+                if (skipped) {
+                  setNotice(skipped)
+                } else {
+                  onOpenChange(false)
+                }
+              })
               .catch((err) =>
                 setError(
                   err instanceof Error
@@ -47,8 +68,12 @@ export function AddCandidatesDialog({
                     : "Could not upload the batch.",
                 ),
               )
+              .finally(() => setBusy(false))
           }}
         />
+        {notice && (
+          <p className="mt-2 text-xs text-muted-foreground">{notice}</p>
+        )}
         {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
       </DialogContent>
     </Dialog>
