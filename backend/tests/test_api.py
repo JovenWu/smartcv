@@ -1,10 +1,16 @@
+import asyncio
 import time
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
 
+import backend.app.api as api_module
 from backend.app.config import Settings
+from backend.app.database import SQLiteRepository
+from backend.app.events import EventHub
 from backend.app.main import create_app
+from backend.app.schemas import OpeningCreate
 from backend.app.typesafe_adapter import (
     FakeEvaluator,
     RetryableEvaluationError,
@@ -352,6 +358,224 @@ def test_retryable_failure_can_be_retried(settings, tmp_path):
         ).json()[0]
         assert candidate["status"] == "complete"
         assert candidate["totalScore"] is not None
+
+
+def _upload_one(client, opening_id, name="cv.pdf", payload=None):
+    response = client.post(
+        f"/api/openings/{opening_id}/candidates",
+        files=[
+            (
+                "files",
+                (name, payload or pdf_bytes("Built Python services"),
+                 "application/pdf"),
+            )
+        ],
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def test_delete_candidate_removes_row_file_and_allows_reupload(
+    client, settings
+):
+    opening_id = make_opening(client)
+    payload = pdf_bytes("Built Python services")
+    upload = _upload_one(client, opening_id, "jane.pdf", payload)
+    candidate_id = upload["candidates"][0]["id"]
+    stored = settings.uploads_dir / f"{candidate_id}.pdf"
+    assert stored.exists()
+
+    response = client.delete(
+        f"/api/openings/{opening_id}/candidates/{candidate_id}"
+    )
+    assert response.status_code == 204
+    assert (
+        client.get(f"/api/openings/{opening_id}/candidates").json() == []
+    )
+    assert not stored.exists()
+    # Deleting twice is a 404.
+    assert (
+        client.delete(
+            f"/api/openings/{opening_id}/candidates/{candidate_id}"
+        ).status_code
+        == 404
+    )
+    # The file hash is gone with the row: re-uploading is not a dupe.
+    reupload = _upload_one(client, opening_id, "jane-copy.pdf", payload)
+    assert len(reupload["candidates"]) == 1
+    assert reupload["duplicates"] == []
+
+
+def test_delete_candidate_rejects_wrong_opening(client):
+    opening_a = make_opening(client)
+    opening_b = make_opening(client)
+    upload = _upload_one(client, opening_a)
+    candidate_id = upload["candidates"][0]["id"]
+    assert (
+        client.delete(
+            f"/api/openings/{opening_b}/candidates/{candidate_id}"
+        ).status_code
+        == 404
+    )
+    assert (
+        client.delete(
+            f"/api/openings/{opening_a}/candidates/nope"
+        ).status_code
+        == 404
+    )
+
+
+def test_bulk_decision_updates_and_404s(client):
+    opening_id = make_opening(client)
+    upload = client.post(
+        f"/api/openings/{opening_id}/candidates",
+        files=[
+            ("files", ("a.pdf", pdf_bytes("Python"), "application/pdf")),
+            ("files", ("b.pdf", pdf_bytes("PostgreSQL"), "application/pdf")),
+        ],
+    ).json()
+    ids = [c["id"] for c in upload["candidates"]]
+    response = client.post(
+        f"/api/openings/{opening_id}/candidates/bulk-decision",
+        json={"candidateIds": ids + ["ghost"], "decision": "shortlisted"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"updated": 2}
+    candidates = {
+        c["id"]: c
+        for c in client.get(f"/api/openings/{opening_id}/candidates").json()
+    }
+    assert all(c["decision"] == "shortlisted" for c in candidates.values())
+    assert (
+        client.post(
+            "/api/openings/nope/candidates/bulk-decision",
+            json={"candidateIds": ids, "decision": "passed"},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/api/openings/{opening_id}/candidates/bulk-decision",
+            json={"candidateIds": ids, "decision": "bogus"},
+        ).status_code
+        == 422
+    )
+
+
+def test_batch_insert_failure_unlinks_orphan_files(
+    app, client, settings, monkeypatch
+):
+    opening_id = make_opening(client)
+    repository = app.state.repository
+
+    async def boom(opening_id, items):
+        raise RuntimeError("db exploded")
+
+    monkeypatch.setattr(repository, "add_candidates", boom)
+    files = [
+        ("files", ("a.pdf", pdf_bytes("x"), "application/pdf")),
+        ("files", ("b.pdf", pdf_bytes("y"), "application/pdf")),
+    ]
+    with pytest.raises(RuntimeError, match="db exploded"):
+        client.post(f"/api/openings/{opening_id}/candidates", files=files)
+    # No candidate rows and no orphaned uploads remain.
+    assert (
+        client.get(f"/api/openings/{opening_id}/candidates").json() == []
+    )
+    assert list(settings.uploads_dir.iterdir()) == []
+
+
+async def test_opening_event_stream_handles_missing_opening(tmp_path):
+    repository = SQLiteRepository(tmp_path / "sse.sqlite3")
+    await repository.open()
+    try:
+        opening_id = uuid.uuid4().hex
+        await repository.create_opening(
+            opening_id,
+            OpeningCreate(title="Role", criteria=make_criteria()),
+        )
+        # Deleted before the stream's snapshot read — the generator must
+        # end quietly instead of crashing on snapshot.model_dump.
+        await repository.delete_opening(opening_id)
+        chunks = [
+            chunk
+            async for chunk in api_module.opening_event_stream(
+                repository, EventHub(), opening_id
+            )
+        ]
+        assert chunks == []
+    finally:
+        await repository.close()
+
+
+async def test_opening_event_stream_ends_on_opening_deleted(tmp_path):
+    repository = SQLiteRepository(tmp_path / "sse.sqlite3")
+    await repository.open()
+    try:
+        opening_id = uuid.uuid4().hex
+        await repository.create_opening(
+            opening_id,
+            OpeningCreate(title="Role", criteria=make_criteria()),
+        )
+        hub = EventHub()
+        stream = api_module.opening_event_stream(repository, hub, opening_id)
+        first = await anext(stream)
+        assert first.startswith("event: snapshot")
+        # Opening deleted mid-flight: hub pushes opening.deleted + close.
+        await repository.delete_opening(opening_id)
+        hub.close_opening(opening_id)
+        chunks = [chunk async for chunk in stream]
+        assert len(chunks) == 1
+        assert chunks[0].startswith("event: opening.deleted")
+        assert '"openingId"' in chunks[0]
+    finally:
+        await repository.close()
+
+
+async def test_opening_event_stream_emits_heartbeat(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_module, "_SSE_HEARTBEAT_SECONDS", 0.05)
+    repository = SQLiteRepository(tmp_path / "sse.sqlite3")
+    await repository.open()
+    try:
+        opening_id = uuid.uuid4().hex
+        await repository.create_opening(
+            opening_id,
+            OpeningCreate(title="Role", criteria=make_criteria()),
+        )
+        stream = api_module.opening_event_stream(
+            repository, EventHub(), opening_id
+        )
+        try:
+            assert (await anext(stream)).startswith("event: snapshot")
+            heartbeat = await asyncio.wait_for(anext(stream), timeout=2)
+            assert heartbeat == ": hb\n\n"
+            heartbeat = await asyncio.wait_for(anext(stream), timeout=2)
+            assert heartbeat == ": hb\n\n"
+        finally:
+            await stream.aclose()
+    finally:
+        await repository.close()
+
+
+def test_suggestion_error_is_sanitized(settings):
+    class FailingEvaluator(FakeEvaluator):
+        async def suggest_weights(self, criteria):
+            raise RetryableEvaluationError(
+                "provider refused key sk-secret-value"
+            )
+
+    with TestClient(create_app(settings, evaluator=FailingEvaluator())) as client:
+        response = client.post(
+            "/api/weight-suggestions",
+            json={
+                "criteria": [
+                    {"id": "c1", "name": "Python", "description": "d"}
+                ]
+            },
+        )
+        assert response.status_code == 502
+        assert response.json()["detail"] == "Suggestion request failed"
+        assert "sk-secret-value" not in response.text
 
 
 def test_sse_sends_final_snapshot_and_closes(client):

@@ -10,12 +10,19 @@ everyone out, which is acceptable for a demo deployment.
 import hmac
 import secrets
 import time
+from collections import deque
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 SESSION_COOKIE = "smartcv_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
+
+# In-memory per-IP login throttling: more than this many failed attempts
+# inside the sliding window -> 429 until the window drains or a login
+# succeeds.
+LOGIN_RATE_LIMIT_ATTEMPTS = 10
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = 60.0
 
 
 class SessionStore:
@@ -46,6 +53,47 @@ class SessionStore:
 
 def _accounts(request: Request) -> dict[str, str]:
     return request.app.state.settings.demo_accounts
+
+
+def _login_attempts(request: Request) -> dict[str, deque[float]]:
+    """Per-app store: {client_ip: deque of failed-attempt timestamps}."""
+    store = getattr(request.app.state, "login_attempts", None)
+    if store is None:
+        store = {}
+        request.app.state.login_attempts = store
+    return store
+
+
+def _client_ip(request: Request) -> str:
+    if request.client is not None and request.client.host:
+        return request.client.host
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip() or "unknown"
+    return "unknown"
+
+
+def _record_failed_login(request: Request, ip: str) -> int:
+    """Append a failure for ip after pruning expired ones; return count."""
+    now = time.monotonic()
+    window = _login_attempts(request).setdefault(ip, deque())
+    cutoff = now - LOGIN_RATE_LIMIT_WINDOW_SECONDS
+    while window and window[0] <= cutoff:
+        window.popleft()
+    window.append(now)
+    return len(window)
+
+
+def _clear_failed_logins(request: Request, ip: str) -> None:
+    _login_attempts(request).pop(ip, None)
+
+
+def _secure_cookie(request: Request) -> bool:
+    """Honor X-Forwarded-Proto when TLS terminates at a proxy."""
+    return (
+        request.url.scheme == "https"
+        or request.headers.get("x-forwarded-proto") == "https"
+    )
 
 
 def _session_user(request: Request) -> str | None:
@@ -86,20 +134,29 @@ auth_router = APIRouter(prefix="/api/auth")
 @auth_router.post("/login", status_code=204)
 async def login(body: LoginRequest, request: Request, response: Response):
     accounts = _accounts(request)
+    ip = _client_ip(request)
     expected = accounts.get(body.username)
-    if expected is None or not hmac.compare_digest(expected, body.password):
-        raise HTTPException(
-            status_code=401, detail="Invalid username or password"
+    if expected is not None and hmac.compare_digest(
+        expected, body.password
+    ):
+        _clear_failed_logins(request, ip)
+        token = request.app.state.sessions.create(body.username)
+        response.set_cookie(
+            SESSION_COOKIE,
+            token,
+            httponly=True,
+            samesite="lax",
+            secure=_secure_cookie(request),
+            max_age=SESSION_TTL_SECONDS,
+            path="/",
         )
-    token = request.app.state.sessions.create(body.username)
-    response.set_cookie(
-        SESSION_COOKIE,
-        token,
-        httponly=True,
-        samesite="lax",
-        secure=request.url.scheme == "https",
-        max_age=SESSION_TTL_SECONDS,
-        path="/",
+        return
+    if _record_failed_login(request, ip) > LOGIN_RATE_LIMIT_ATTEMPTS:
+        raise HTTPException(
+            status_code=429, detail="Too many attempts, try again later"
+        )
+    raise HTTPException(
+        status_code=401, detail="Invalid username or password"
     )
 
 

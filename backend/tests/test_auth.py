@@ -129,3 +129,47 @@ def test_no_accounts_configured_means_open_access(open_client):
         "authenticated": True,
         "username": None,
     }
+
+
+def test_login_is_rate_limited_after_ten_failures(gated_client):
+    bad = {"username": "recruiter", "password": "wrong"}
+    for _ in range(10):
+        assert (
+            gated_client.post("/api/auth/login", json=bad).status_code
+            == 401
+        )
+    blocked = gated_client.post("/api/auth/login", json=bad)
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"] == "Too many attempts, try again later"
+    # Still locked out on the next bad attempt inside the window.
+    assert gated_client.post("/api/auth/login", json=bad).status_code == 429
+
+
+def test_successful_login_resets_the_rate_limit(gated_client):
+    bad = {"username": "recruiter", "password": "wrong"}
+    for _ in range(12):
+        gated_client.post("/api/auth/login", json=bad)
+    ok = gated_client.post(
+        "/api/auth/login",
+        json={"username": "recruiter", "password": "s3cret"},
+    )
+    assert ok.status_code == 204
+    # The counter was cleared: a fresh bad attempt is a plain 401.
+    assert gated_client.post("/api/auth/login", json=bad).status_code == 401
+
+
+def test_cookie_secure_flag_honors_forwarded_proto(gated_client):
+    plain = gated_client.post(
+        "/api/auth/login",
+        json={"username": "recruiter", "password": "s3cret"},
+    )
+    assert plain.status_code == 204
+    assert "secure" not in plain.headers["set-cookie"].lower()
+
+    forwarded = gated_client.post(
+        "/api/auth/login",
+        json={"username": "recruiter", "password": "s3cret"},
+        headers={"X-Forwarded-Proto": "https"},
+    )
+    assert forwarded.status_code == 204
+    assert "secure" in forwarded.headers["set-cookie"].lower()

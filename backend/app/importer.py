@@ -6,6 +6,7 @@ extraction -> Jev weight suggestions. Produces a reviewer-editable
 ``ImportDraft``; nothing is persisted until the reviewer saves the opening.
 """
 
+import asyncio
 import base64
 import html
 import ipaddress
@@ -13,6 +14,7 @@ import json
 import logging
 import mimetypes
 import re
+import socket
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +61,12 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 # comes from user input and its content is returned to the caller.
 _MAX_FETCH_BYTES = 2 * 1024 * 1024
 _MAX_REDIRECTS = 5
+
+# Chromium processes are heavy; parallel imports share this pool.
+_BROWSER_SEMAPHORE = asyncio.Semaphore(2)
+
+_ResolvedAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+_DnsCache = dict[str, list[_ResolvedAddress]]
 
 # OpenAI strict mode (used by the gpt-6-luna provider) requires `required`
 # to list every property; optional fields stay nullable instead.
@@ -263,6 +271,101 @@ def _canonical_listing_url(url: str) -> str:
     return url
 
 
+def _is_non_public(address: _ResolvedAddress) -> bool:
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+        or address.is_multicast
+    )
+
+
+async def _resolve_host(host: str) -> list[_ResolvedAddress]:
+    """Resolve a hostname via getaddrinfo (off the event loop).
+
+    Returns every advertised address; resolution failures raise so the
+    caller fails closed — a host we cannot verify is not fetchable.
+    """
+    infos = await asyncio.to_thread(socket.getaddrinfo, host, None)
+    addresses: list[_ResolvedAddress] = []
+    for info in infos:
+        sockaddr = info[4]
+        raw = str(sockaddr[0]).split("%", 1)[0]  # strip IPv6 scope id
+        try:
+            addresses.append(ipaddress.ip_address(raw))
+        except ValueError:
+            continue
+    return addresses
+
+
+async def _check_url(url: str, dns_cache: _DnsCache | None = None) -> None:
+    """Reject non-http(s) and non-public link targets (SSRF guard).
+
+    Literal IPs are checked directly; hostnames are DNS-resolved and
+    rejected when ANY returned address is non-public. A name that does
+    not resolve is rejected too (fail closed). ``dns_cache`` memoizes
+    resolutions for the lifetime of one import request.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ListingNotReadable("Only http(s) links can be imported.")
+    host = (parsed.hostname or "").lower()
+    if not host or "." not in host:
+        raise ListingNotReadable("Link has no public host.")
+    if host == "localhost" or host.endswith(
+        (".localhost", ".local", ".internal", ".lan")
+    ):
+        raise ListingNotReadable("Link points to a local host.")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None:
+        if _is_non_public(address):
+            raise ListingNotReadable(
+                "Link points to a non-public address."
+            )
+        return
+    addresses: list[_ResolvedAddress] | None = (
+        dns_cache.get(host) if dns_cache is not None else None
+    )
+    if addresses is None:
+        try:
+            addresses = await _resolve_host(host)
+        except Exception as error:
+            log.info("DNS lookup failed for %s: %r", host, error)
+            raise ListingNotReadable(
+                "Link host could not be resolved."
+            ) from error
+        if dns_cache is not None:
+            dns_cache[host] = addresses
+    if not addresses:
+        raise ListingNotReadable("Link host could not be resolved.")
+    if any(_is_non_public(resolved) for resolved in addresses):
+        raise ListingNotReadable(
+            "Link host resolves to a non-public address."
+        )
+
+
+async def _guard_browser_route(route, dns_cache: _DnsCache) -> None:
+    """Playwright route hook: abort requests to non-public destinations.
+
+    Redirect hops and subresource fetches never re-enter ``_fetch_link``,
+    so every request the page makes is re-validated here.
+    """
+    request_url = route.request.url
+    try:
+        await _check_url(request_url, dns_cache)
+    except Exception as error:
+        host = urlparse(request_url).hostname or urlparse(request_url).scheme
+        log.info("Blocked browser request to %s: %r", host, error)
+        await route.abort()
+        return
+    await route.continue_()
+
+
 class LangGraphImporter:
     """Real importer: fetch/search -> gpt-6-luna extraction -> Jev weights."""
 
@@ -322,13 +425,16 @@ class LangGraphImporter:
         source = state["source"]
         if source.kind == "link":
             url = _canonical_listing_url(source.url)
-            text = await self._fetch_link(url)
+            # Resolutions are memoized for this one request (redirect
+            # loops and the browser tier re-check the same hosts).
+            dns_cache: _DnsCache = {}
+            text = await self._fetch_link(url, dns_cache)
             warnings: list[str] = []
             if (
                 len(text) < self.settings.import_min_source_chars
                 and self.settings.import_browser_enabled
             ):
-                rendered = await self._fetch_browser(url)
+                rendered = await self._fetch_browser(url, dns_cache)
                 if len(rendered) > len(text):
                     text = rendered
                     warnings.append(
@@ -345,23 +451,34 @@ class LangGraphImporter:
         )
         if suffix == ".pdf":
             try:
-                text = _pdf_text(path)
-            except Exception:
+                text = await asyncio.to_thread(_pdf_text, path)
+            except Exception as error:
+                log.info(
+                    "PDF text extraction failed for %s: %r",
+                    source.filename,
+                    error,
+                )
                 text = ""
             if len(text) >= self.settings.import_min_source_chars:
                 return {"source_text": text[: self.settings.import_max_chars]}
-            part = _file_part(path, "application/pdf", source.filename)
+            part = await asyncio.to_thread(
+                _file_part, path, "application/pdf", source.filename
+            )
             return {"source_text": text, "binary_parts": [part]}
         if suffix == ".docx":
             try:
-                text = _docx_text(path)
+                text = await asyncio.to_thread(_docx_text, path)
             except Exception as error:
+                log.warning(
+                    "DOCX parse failed for %s: %r", source.filename, error
+                )
                 raise ListingNotReadable(
-                    f"Could not read '{source.filename}': {error}"
+                    f"Could not read '{source.filename}'."
                 ) from error
             if len(text) >= self.settings.import_min_source_chars:
                 return {"source_text": text[: self.settings.import_max_chars]}
-            part = _file_part(
+            part = await asyncio.to_thread(
+                _file_part,
                 path,
                 "application/vnd.openxmlformats-officedocument"
                 ".wordprocessingml.document",
@@ -371,42 +488,21 @@ class LangGraphImporter:
         if suffix in _IMAGE_SUFFIXES or mime.startswith("image/"):
             if not mime.startswith("image/"):
                 mime = f"image/{suffix.lstrip('.')}"
-            return {"binary_parts": [_file_part(path, mime, source.filename)]}
+            part = await asyncio.to_thread(
+                _file_part, path, mime, source.filename
+            )
+            return {"binary_parts": [part]}
         raise ListingNotReadable(
             f"Unsupported listing file '{source.filename}'"
         )
 
-    @staticmethod
-    def _check_url(url: str) -> None:
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            raise ListingNotReadable("Only http(s) links can be imported.")
-        host = (parsed.hostname or "").lower()
-        if not host or "." not in host:
-            raise ListingNotReadable("Link has no public host.")
-        if host == "localhost" or host.endswith(
-            (".localhost", ".local", ".internal", ".lan")
-        ):
-            raise ListingNotReadable("Link points to a local host.")
-        try:
-            address = ipaddress.ip_address(host)
-        except ValueError:
-            address = None
-        if address is not None and (
-            address.is_private
-            or address.is_loopback
-            or address.is_link_local
-            or address.is_reserved
-            or address.is_unspecified
-            or address.is_multicast
-        ):
-            raise ListingNotReadable("Link points to a non-public address.")
-
-    async def _fetch_link(self, url: str) -> str:
+    async def _fetch_link(
+        self, url: str, dns_cache: _DnsCache | None = None
+    ) -> str:
         current = url
         body: bytes | None = None
         for _ in range(_MAX_REDIRECTS + 1):
-            self._check_url(current)
+            await _check_url(current, dns_cache)
             try:
                 async with self.client.stream(
                     "GET",
@@ -433,7 +529,12 @@ class LangGraphImporter:
                             break
                         chunks.append(chunk)
                     body = b"".join(chunks)[:_MAX_FETCH_BYTES]
-            except httpx.HTTPError:
+            except httpx.HTTPError as error:
+                log.info(
+                    "Direct fetch failed for %s: %r",
+                    urlparse(current).hostname,
+                    error,
+                )
                 return ""
             break
         if body is None:
@@ -441,7 +542,9 @@ class LangGraphImporter:
         text = body.decode("utf-8", errors="replace")
         return _html_to_text(text)[: self.settings.import_max_chars]
 
-    async def _fetch_browser(self, url: str) -> str:
+    async def _fetch_browser(
+        self, url: str, dns_cache: _DnsCache | None = None
+    ) -> str:
         """Render the page in headless Chromium.
 
         Bot-protected boards (Jobstreet, LinkedIn) answer plain HTTP with a
@@ -454,46 +557,63 @@ class LangGraphImporter:
         except ImportError:
             log.warning("playwright unavailable; skipping browser fetch")
             return ""
-        self._check_url(url)
+        if dns_cache is None:
+            dns_cache = {}
+        await _check_url(url, dns_cache)
         timeout_ms = int(self.settings.import_browser_timeout * 1000)
-        try:
-            async with async_playwright() as playwright:
-                browser = await playwright.chromium.launch(
-                    headless=True,
-                    args=["--disable-blink-features=AutomationControlled"],
+
+        async def _route_guard(route):
+            await _guard_browser_route(route, dns_cache)
+
+        # Semaphore-capped: each render owns a Chromium process.
+        async with _BROWSER_SEMAPHORE:
+            try:
+                async with async_playwright() as playwright:
+                    browser = await playwright.chromium.launch(
+                        headless=True,
+                        args=["--disable-blink-features=AutomationControlled"],
+                    )
+                    try:
+                        context = await browser.new_context(
+                            user_agent=_CHROME_UA,
+                            viewport={"width": 1440, "height": 900},
+                        )
+                        await context.add_init_script(
+                            "Object.defineProperty(navigator, 'webdriver',"
+                            " {get: () => undefined})"
+                        )
+                        # Intercept BEFORE any navigation: the guard
+                        # re-validates every request the context makes —
+                        # redirect hops, subresources, popups — so a page
+                        # can never talk to a non-public host.
+                        await context.route("**/*", _route_guard)
+                        page = await context.new_page()
+                        await page.goto(
+                            url,
+                            wait_until="domcontentloaded",
+                            timeout=timeout_ms,
+                        )
+                        # Bot-check interstitials ("Just a moment…", security
+                        # verification) auto-resolve after their JS runs; poll
+                        # the title until the real page appears.
+                        remaining = timeout_ms
+                        while remaining > 0:
+                            title = (await page.title()).lower()
+                            if "moment" not in title and "verif" not in title:
+                                break
+                            await page.wait_for_timeout(2000)
+                            remaining -= 2000
+                        await _check_url(page.url, dns_cache)  # backstop
+                        text = await page.evaluate("document.body.innerText")
+                    finally:
+                        await browser.close()
+            except Exception as error:
+                log.warning(
+                    "Browser fetch failed for %s: %r",
+                    urlparse(url).hostname,
+                    error,
                 )
-                try:
-                    context = await browser.new_context(
-                        user_agent=_CHROME_UA,
-                        viewport={"width": 1440, "height": 900},
-                    )
-                    await context.add_init_script(
-                        "Object.defineProperty(navigator, 'webdriver',"
-                        " {get: () => undefined})"
-                    )
-                    page = await context.new_page()
-                    await page.goto(
-                        url,
-                        wait_until="domcontentloaded",
-                        timeout=timeout_ms,
-                    )
-                    # Bot-check interstitials ("Just a moment…", security
-                    # verification) auto-resolve after their JS runs; poll
-                    # the title until the real page appears.
-                    remaining = timeout_ms
-                    while remaining > 0:
-                        title = (await page.title()).lower()
-                        if "moment" not in title and "verif" not in title:
-                            break
-                        await page.wait_for_timeout(2000)
-                        remaining -= 2000
-                    self._check_url(page.url)
-                    text = await page.evaluate("document.body.innerText")
-                finally:
-                    await browser.close()
-        except Exception as error:
-            log.warning("Browser fetch failed for %s: %r", url, error)
-            return ""
+                return ""
         return str(text or "")[: self.settings.import_max_chars]
 
     def _needs_search(self, state: ImportState) -> str:

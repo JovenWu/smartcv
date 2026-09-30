@@ -30,6 +30,12 @@ import {
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 
+/** Editable criterion plus a stable row id — index keys break row state
+ * when earlier rows are removed mid-edit. */
+interface CriterionRow extends NewCriterionInput {
+  rowId: number
+}
+
 export function ManualOpeningForm({
   onDone,
   initial,
@@ -61,8 +67,9 @@ export function ManualOpeningForm({
   const [closesAt, setClosesAt] = useState(initial?.closesAt ?? "")
   const [skills, setSkills] = useState(initial?.skills?.join(", ") ?? "")
   const [description, setDescription] = useState(initial?.description ?? "")
-  const [criteria, setCriteria] = useState<NewCriterionInput[]>(
-    initial?.criteria ?? [],
+  const rowSeq = useRef(0)
+  const [criteria, setCriteria] = useState<CriterionRow[]>(() =>
+    (initial?.criteria ?? []).map((c) => ({ ...c, rowId: ++rowSeq.current })),
   )
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
@@ -133,7 +140,16 @@ export function ManualOpeningForm({
             current.has(s.skill.trim().toLowerCase()),
           )
           if (!fresh.length) return
-          setCriteria((prev) => mergeSuggestions(prev, fresh))
+          setCriteria((prev) => {
+            const merged = mergeSuggestions(prev, fresh)
+            // mergeSuggestions only appends — existing rows keep their
+            // rowId, new suggestions get fresh ones.
+            return merged.map((c, i) =>
+              i < prev.length
+                ? prev[i]
+                : { ...c, rowId: ++rowSeq.current },
+            )
+          })
         })
         .catch(() => {
           // Suggestions are best-effort — typing must never block on Jev.
@@ -165,7 +181,7 @@ export function ManualOpeningForm({
           .filter(Boolean),
         closesAt: closesAt || undefined,
         source: initial?.source,
-        criteria,
+        criteria: criteria.map(({ rowId: _rowId, ...criterion }) => criterion),
       })
       onDone()
     } catch (error) {
@@ -312,7 +328,7 @@ export function ManualOpeningForm({
           </FieldDescription>
           <div className="flex flex-col gap-2">
             {criteria.map((criterion, i) => (
-              <div key={i} className="flex items-center gap-2">
+              <div key={criterion.rowId} className="flex items-center gap-2">
                 <Input
                   placeholder="e.g. React experience"
                   value={criterion.name}
@@ -366,9 +382,10 @@ export function ManualOpeningForm({
               variant="outline"
               size="sm"
               className="w-fit"
-              onClick={() =>
-                setCriteria((prev) => [...prev, { name: "", weight: 3 }])
-              }
+              onClick={() => {
+                const rowId = ++rowSeq.current
+                setCriteria((prev) => [...prev, { name: "", weight: 3, rowId }])
+              }}
             >
               <PlusIcon />
               Add criterion

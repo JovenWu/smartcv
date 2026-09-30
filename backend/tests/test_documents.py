@@ -24,10 +24,10 @@ from backend.tests.factories import (
 
 
 @pytest.fixture
-def test_settings(tmp_path, monkeypatch):
-    settings = Settings(_env_file=None, data_dir=tmp_path / "data")
-    monkeypatch.setattr(documents, "get_settings", lambda: settings)
-    return settings
+def test_settings(tmp_path):
+    """Settings injected into parse_cv — exercises the caller-injected
+    wiring the worker pool uses (no global get_settings)."""
+    return Settings(_env_file=None, data_dir=tmp_path / "data")
 
 
 CV_TEXT = (
@@ -40,7 +40,7 @@ CV_TEXT = (
 def test_pdf_spans_have_one_based_pages_and_verbatim_text(tmp_path, test_settings):
     source = tmp_path / "stored-uuid"
     write_multipage_pdf(source, ["Page one content.", "Page two content."])
-    parsed = parse_cv(source, "candidate.pdf")
+    parsed = parse_cv(source, "candidate.pdf", test_settings)
     assert parsed.preview_path == source
     assert len(parsed.spans) >= 2
     pages = {span.page_number for span in parsed.spans}
@@ -58,7 +58,7 @@ def test_evaluation_view_masks_contact_lines_but_source_preserves_them(
 ):
     source = tmp_path / "stored-uuid"
     write_pdf(source, CV_TEXT)
-    parsed = parse_cv(source, "candidate.pdf")
+    parsed = parse_cv(source, "candidate.pdf", test_settings)
     source_text = " ".join(span.text for span in parsed.spans)
     assert "alex@example.com" in source_text
     evaluation_spans = prepare_evaluation_spans(parsed.spans)
@@ -73,28 +73,28 @@ def test_unknown_extension_is_rejected(tmp_path, test_settings):
     source = tmp_path / "stored-uuid"
     source.write_bytes(b"plain text")
     with pytest.raises(UnsupportedFile):
-        parse_cv(source, "notes.txt")
+        parse_cv(source, "notes.txt", test_settings)
 
 
 def test_invalid_pdf_signature_is_rejected(tmp_path, test_settings):
     source = tmp_path / "stored-uuid"
     source.write_bytes(b"not a PDF at all")
     with pytest.raises(UnsupportedFile):
-        parse_cv(source, "candidate.pdf")
+        parse_cv(source, "candidate.pdf", test_settings)
 
 
 def test_image_only_pdf_needs_manual_review(tmp_path, test_settings):
     source = tmp_path / "stored-uuid"
     write_pdf(source, "")
     with pytest.raises(NeedsManualReview):
-        parse_cv(source, "scanned.pdf")
+        parse_cv(source, "scanned.pdf", test_settings)
 
 
 def test_corrupt_docx_is_rejected(tmp_path, test_settings):
     source = tmp_path / "stored-uuid"
     source.write_bytes(b"definitely not a zip")
     with pytest.raises(UnsupportedFile):
-        parse_cv(source, "cv.docx")
+        parse_cv(source, "cv.docx", test_settings)
 
 
 def test_zip_that_is_not_docx_is_rejected(tmp_path, test_settings):
@@ -102,7 +102,7 @@ def test_zip_that_is_not_docx_is_rejected(tmp_path, test_settings):
     with zipfile.ZipFile(source, "w") as archive:
         archive.writestr("readme.txt", "hello")
     with pytest.raises(UnsupportedFile):
-        parse_cv(source, "cv.docx")
+        parse_cv(source, "cv.docx", test_settings)
 
 
 def test_oversized_file_is_rejected(tmp_path, test_settings):
@@ -110,7 +110,7 @@ def test_oversized_file_is_rejected(tmp_path, test_settings):
     source = tmp_path / "stored-uuid"
     source.write_bytes(b"%PDF-" + b"x" * 200)
     with pytest.raises(UnsupportedFile):
-        parse_cv(source, "big.pdf")
+        parse_cv(source, "big.pdf", test_settings)
 
 
 def test_missing_renderer_raises_typed_error(tmp_path, test_settings, monkeypatch):
@@ -118,7 +118,7 @@ def test_missing_renderer_raises_typed_error(tmp_path, test_settings, monkeypatc
     write_docx(source, "Some CV text")
     monkeypatch.setattr(documents.shutil, "which", lambda name: None)
     with pytest.raises(RendererUnavailable):
-        parse_cv(source, "cv.docx")
+        parse_cv(source, "cv.docx", test_settings)
 
 
 def test_conversion_timeout_is_unreadable(tmp_path, test_settings, monkeypatch):
@@ -131,7 +131,7 @@ def test_conversion_timeout_is_unreadable(tmp_path, test_settings, monkeypatch):
 
     monkeypatch.setattr(documents.subprocess, "run", slow_run)
     with pytest.raises(UnreadableDocument):
-        parse_cv(source, "cv.docx")
+        parse_cv(source, "cv.docx", test_settings)
 
 
 def test_failed_conversion_output_is_unreadable(
@@ -146,7 +146,7 @@ def test_failed_conversion_output_is_unreadable(
 
     monkeypatch.setattr(documents.subprocess, "run", no_output)
     with pytest.raises(UnreadableDocument):
-        parse_cv(source, "cv.docx")
+        parse_cv(source, "cv.docx", test_settings)
 
 
 @pytest.mark.skipif(
@@ -155,7 +155,7 @@ def test_failed_conversion_output_is_unreadable(
 def test_docx_converts_to_page_linked_preview(tmp_path, test_settings):
     source = tmp_path / "stored-uuid"
     write_docx(source, "Docx body: Python backend services.")
-    parsed = parse_cv(source, "cv.docx")
+    parsed = parse_cv(source, "cv.docx", test_settings)
     assert parsed.preview_path.suffix == ".pdf"
     assert parsed.preview_path.exists()
     assert parsed.preview_path != source

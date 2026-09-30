@@ -17,6 +17,7 @@ import {
 import type {
   EmploymentType,
   Opening as OpeningModel,
+  OpeningStatus,
   WorkArrangement,
 } from "@/types"
 
@@ -163,6 +164,21 @@ export async function refreshOpenings(): Promise<void> {
   return inflight
 }
 
+const REFRESH_DEBOUNCE_MS = 500
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * Trailing-debounced refresh for SSE bursts — a batch of server events
+ * collapses into a single list refetch once events stop arriving.
+ */
+export function refreshOpeningsSoon(): void {
+  if (refreshTimer) clearTimeout(refreshTimer)
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null
+    void refreshOpenings().catch(() => {})
+  }, REFRESH_DEBOUNCE_MS)
+}
+
 export function slugify(title: string): string {
   return (
     title
@@ -266,6 +282,26 @@ export async function updateOpening(
   await refreshOpenings()
 }
 
+export async function removeOpening(id: string): Promise<void> {
+  await openingsApi.remove(id)
+  await refreshOpenings()
+}
+
+export async function setOpeningStatus(
+  id: string,
+  status: OpeningStatus,
+): Promise<void> {
+  await openingsApi.update(id, { status })
+  await refreshOpenings()
+}
+
+export async function setOpeningArchived(
+  id: string,
+  archived: boolean,
+): Promise<void> {
+  await setOpeningStatus(id, archived ? "archived" : "open")
+}
+
 // ---------- skill -> criteria suggestions ----------
 
 /**
@@ -299,4 +335,8 @@ export function __resetOpeningsForTests() {
   loaded = false
   loadError = null
   inflight = null
+  if (refreshTimer) {
+    clearTimeout(refreshTimer)
+    refreshTimer = null
+  }
 }

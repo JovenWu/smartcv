@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pymupdf
 
-from backend.app.config import get_settings
+from backend.app.config import Settings, get_settings
 from backend.app.schemas import EvaluationSpan, EvidenceSpan
 
 _ALLOWED_SUFFIXES = {".pdf", ".docx"}
@@ -60,8 +60,18 @@ def validate_upload(
     return suffix
 
 
-def parse_cv(path: Path, original_filename: str) -> ParsedDocument:
-    settings = get_settings()
+def parse_cv(
+    path: Path,
+    original_filename: str,
+    settings: Settings | None = None,
+) -> ParsedDocument:
+    """Validate + extract a stored upload.
+
+    Callers inject the app Settings (the worker pool passes through the
+    one on app.state); the global get_settings() is only a fallback for
+    legacy callers.
+    """
+    settings = settings or get_settings()
     suffix = validate_upload(path, original_filename, settings.max_file_bytes)
     if suffix == ".pdf":
         preview_path = path

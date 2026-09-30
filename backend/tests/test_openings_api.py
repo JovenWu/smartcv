@@ -1,9 +1,20 @@
+import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.config import Settings
 from backend.app.main import create_app
 from backend.tests.factories import make_criteria
+
+
+def pdf_bytes(text: str) -> bytes:
+    document = pymupdf.open()
+    page = document.new_page()
+    if text:
+        page.insert_text((72, 72), text)
+    data = document.tobytes()
+    document.close()
+    return data
 
 
 @pytest.fixture
@@ -100,3 +111,51 @@ def test_unknown_opening_404s(client):
     assert client.get("/api/openings/nope").status_code == 404
     assert client.patch("/api/openings/nope", json={"title": "x"}).status_code == 404
     assert client.get("/api/openings/nope/candidates").status_code == 404
+    assert client.delete("/api/openings/nope").status_code == 404
+
+
+def test_archived_status_round_trips(client):
+    opening = make_opening(client)
+    oid = opening["id"]
+    assert opening["status"] == "open"
+
+    archived = client.patch(f"/api/openings/{oid}", json={"status": "archived"})
+    assert archived.status_code == 200
+    assert archived.json()["status"] == "archived"
+
+    listed = client.get("/api/openings").json()
+    assert [o["id"] for o in listed] == [oid]
+    assert listed[0]["status"] == "archived"
+    assert client.get(f"/api/openings/{oid}").json()["status"] == "archived"
+
+    restored = client.patch(f"/api/openings/{oid}", json={"status": "open"})
+    assert restored.status_code == 200
+    assert client.get("/api/openings").json()[0]["status"] == "open"
+
+
+def test_delete_opening_cascades_rows_and_files(client, settings):
+    opening = make_opening(client)
+    oid = opening["id"]
+    upload = client.post(
+        f"/api/openings/{oid}/candidates",
+        files=[
+            ("files", ("a.pdf", pdf_bytes("Python"), "application/pdf")),
+            ("files", ("b.pdf", pdf_bytes("Postgres"), "application/pdf")),
+        ],
+    )
+    assert upload.status_code == 201
+    assert len(upload.json()["candidates"]) == 2
+    assert list(settings.uploads_dir.iterdir()), "stored uploads expected"
+
+    response = client.delete(f"/api/openings/{oid}")
+    assert response.status_code == 204
+
+    assert client.get(f"/api/openings/{oid}").status_code == 404
+    assert client.get(f"/api/openings/{oid}/candidates").status_code == 404
+    assert client.delete(f"/api/openings/{oid}").status_code == 404
+    listed = client.get("/api/openings").json()
+    assert all(o["id"] != oid for o in listed)
+    # Stored CV files are gone as well.
+    assert list(settings.uploads_dir.iterdir()) == []
+    # Events for a deleted opening no longer stream.
+    assert client.get(f"/api/openings/{oid}/events").status_code == 404

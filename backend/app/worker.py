@@ -47,15 +47,22 @@ class CandidateWorkerPool:
         event_publisher,
         worker_count: int = 4,
         reviewer=None,
+        settings=None,
     ) -> None:
         self.repository = repository
         self.evaluator = evaluator
         self.event_publisher = event_publisher
         self.worker_count = worker_count
         self.reviewer = reviewer
+        self.settings = settings
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._pending: set[str] = set()
         self._tasks: list[asyncio.Task] = []
+        # Criteria-changing opening patches requeue candidates through
+        # the pool (repository keeps no worker reference — no cycle).
+        set_requeue_hook = getattr(repository, "set_requeue_hook", None)
+        if set_requeue_hook is not None:
+            set_requeue_hook(self.enqueue)
 
     async def start(self) -> None:
         for candidate in await self.repository.list_resumable_candidates():
@@ -70,6 +77,15 @@ class CandidateWorkerPool:
             return
         self._pending.add(candidate_id)
         self._queue.put_nowait(candidate_id)
+
+    def discard_pending(self, candidate_id: str) -> None:
+        """Drop a queued-but-not-started candidate (e.g. a deleted row).
+
+        The id stays in the fifo, but _run skips ids no longer pending,
+        so it is never processed; candidates already in flight exit
+        through the get_candidate -> None path instead.
+        """
+        self._pending.discard(candidate_id)
 
     async def stop(self) -> None:
         try:
@@ -88,7 +104,8 @@ class CandidateWorkerPool:
         while True:
             candidate_id = await self._queue.get()
             try:
-                await self.process_candidate(candidate_id)
+                if candidate_id in self._pending:
+                    await self.process_candidate(candidate_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -118,7 +135,10 @@ class CandidateWorkerPool:
         )
         try:
             parsed = await asyncio.to_thread(
-                parse_cv, candidate.stored_path, candidate.filename
+                parse_cv,
+                candidate.stored_path,
+                candidate.filename,
+                self.settings,
             )
         except NeedsManualReview as error:
             await self.repository.mark_candidate_needs_review(

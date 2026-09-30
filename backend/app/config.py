@@ -79,6 +79,11 @@ class Settings(BaseSettings):
         return data
 
     @property
+    def auth_enabled(self) -> bool:
+        """Session auth is on only when SMARTCV_ACCOUNTS has entries."""
+        return bool(self.demo_accounts)
+
+    @property
     def uploads_dir(self) -> Path:
         return self.data_dir / "uploads"
 

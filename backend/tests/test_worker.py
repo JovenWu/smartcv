@@ -6,6 +6,7 @@ import uuid
 import pytest
 
 from backend.app import worker as worker_module
+from backend.app.config import Settings
 from backend.app.database import SQLiteRepository
 from backend.app.events import EventHub, EventPublisher
 from backend.app.schemas import (
@@ -77,6 +78,7 @@ def make_pool(
         event_publisher=publisher,
         worker_count=worker_count,
         reviewer=reviewer,
+        settings=Settings(_env_file=None, data_dir=tmp_path / "data"),
     )
     return pool
 
@@ -172,11 +174,13 @@ async def test_image_pdf_routes_to_manual_review(repository, opening, tmp_path):
     try:
         pool.enqueue(candidate_id)
         deadline = time.time() + 10
-        status = None
         while time.time() < deadline:
             result = await repository.get_candidate_result(candidate_id)
-            status = result.status
-            if status != CandidateStatus.QUEUED:
+            if result.status in {
+                CandidateStatus.COMPLETE,
+                CandidateStatus.NEEDS_REVIEW,
+                CandidateStatus.FAILED,
+            }:
                 break
             await asyncio.sleep(0.05)
         result = await repository.get_candidate_result(candidate_id)
@@ -211,7 +215,11 @@ async def test_invalid_signature_fails_without_retry(
         deadline = time.time() + 10
         while time.time() < deadline:
             result = await repository.get_candidate_result(candidate_id)
-            if result.status != CandidateStatus.QUEUED:
+            if result.status in {
+                CandidateStatus.COMPLETE,
+                CandidateStatus.NEEDS_REVIEW,
+                CandidateStatus.FAILED,
+            }:
                 break
             await asyncio.sleep(0.05)
         result = await repository.get_candidate_result(candidate_id)
@@ -238,7 +246,11 @@ async def test_evaluator_error_fails_retryable(repository, opening, tmp_path):
         deadline = time.time() + 10
         while time.time() < deadline:
             result = await repository.get_candidate_result(candidate_id)
-            if result.status != CandidateStatus.QUEUED:
+            if result.status in {
+                CandidateStatus.COMPLETE,
+                CandidateStatus.NEEDS_REVIEW,
+                CandidateStatus.FAILED,
+            }:
                 break
             await asyncio.sleep(0.05)
         result = await repository.get_candidate_result(candidate_id)
@@ -255,14 +267,14 @@ async def test_worker_respects_concurrency_limit(repository, opening, tmp_path):
 
     real_parse = worker_module.parse_cv
 
-    def counted_parse(path, original_filename):
+    def counted_parse(path, original_filename, settings=None):
         nonlocal active, max_active
         with lock:
             active += 1
             max_active = max(max_active, active)
         try:
             time.sleep(0.05)
-            return real_parse(path, original_filename)
+            return real_parse(path, original_filename, settings)
         finally:
             with lock:
                 active -= 1
@@ -471,6 +483,61 @@ async def test_reviewer_failure_keeps_review_status(
     assert all(
         e.status == MatchStatus.NEEDS_REVIEW for e in result.evaluations
     )
+
+
+async def test_discard_pending_skips_queued_candidate(
+    repository, opening, tmp_path
+):
+    """A deleted candidate still sitting in the queue is never processed."""
+    candidate_id = await add_candidate(
+        repository, opening, tmp_path, text="Python PostgreSQL"
+    )
+    pool = make_pool(repository, tmp_path)
+    processed = []
+    original = pool.process_candidate
+
+    async def spy(candidate_id):
+        processed.append(candidate_id)
+        return await original(candidate_id)
+
+    pool.process_candidate = spy
+    pool.enqueue(candidate_id)
+    # Delete endpoint flow: row gone first, then drop the queued item.
+    await repository.delete_candidate(candidate_id)
+    pool.discard_pending(candidate_id)
+    await pool.start()
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline and not pool._queue.empty():
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)  # let the drained entry be handled
+        assert processed == []
+        assert candidate_id not in pool._pending
+    finally:
+        await pool.stop()
+
+
+async def test_discard_pending_unknown_id_is_noop(repository, tmp_path):
+    pool = make_pool(repository, tmp_path)
+    pool.discard_pending("never-queued")
+    await pool.start()
+    try:
+        assert "never-queued" not in pool._pending
+    finally:
+        await pool.stop()
+
+
+async def test_process_deleted_candidate_is_noop(
+    repository, opening, tmp_path
+):
+    """In-flight candidates for deleted rows exit via get_candidate None."""
+    candidate_id = await add_candidate(
+        repository, opening, tmp_path, text="Python PostgreSQL"
+    )
+    await repository.delete_candidate(candidate_id)
+    pool = make_pool(repository, tmp_path)
+    await pool.process_candidate(candidate_id)  # returns silently
+    assert await repository.get_candidate_result(candidate_id) is None
 
 
 def test_candidate_outcome_flags_uncertain_evaluations():

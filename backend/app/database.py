@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import json
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -37,7 +37,7 @@ TERMINAL_STATUSES = (
     CandidateStatus.FAILED,
 )
 
-_SCHEMA = """
+_OPENINGS_DDL = """
 CREATE TABLE IF NOT EXISTS openings (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS openings (
     updated_at TEXT,
     is_final INTEGER NOT NULL DEFAULT 0
 );
+"""
+_CRITERIA_DDL = """
 CREATE TABLE IF NOT EXISTS criteria (
     opening_id TEXT NOT NULL REFERENCES openings(id),
     criterion_id TEXT NOT NULL,
@@ -70,6 +72,8 @@ CREATE TABLE IF NOT EXISTS criteria (
     position INTEGER NOT NULL,
     PRIMARY KEY (opening_id, criterion_id)
 );
+"""
+_CANDIDATES_DDL = """
 CREATE TABLE IF NOT EXISTS candidates (
     id TEXT PRIMARY KEY,
     opening_id TEXT NOT NULL REFERENCES openings(id),
@@ -89,6 +93,8 @@ CREATE TABLE IF NOT EXISTS candidates (
     retryable INTEGER NOT NULL DEFAULT 0,
     file_hash TEXT
 );
+"""
+_EVIDENCE_SPANS_DDL = """
 CREATE TABLE IF NOT EXISTS evidence_spans (
     candidate_id TEXT NOT NULL REFERENCES candidates(id),
     span_id TEXT NOT NULL,
@@ -98,6 +104,8 @@ CREATE TABLE IF NOT EXISTS evidence_spans (
     position INTEGER NOT NULL,
     PRIMARY KEY (candidate_id, span_id)
 );
+"""
+_EVALUATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS evaluations (
     candidate_id TEXT NOT NULL REFERENCES candidates(id),
     criterion_id TEXT NOT NULL,
@@ -112,6 +120,38 @@ CREATE TABLE IF NOT EXISTS evaluations (
     reviewed_at TEXT,
     PRIMARY KEY (candidate_id, criterion_id)
 );
+"""
+
+_SCHEMA = "\n".join(
+    (
+        _OPENINGS_DDL,
+        _CRITERIA_DDL,
+        _CANDIDATES_DDL,
+        _EVIDENCE_SPANS_DDL,
+        _EVALUATIONS_DDL,
+    )
+)
+
+# Fresh DDL used when _migrate has to rebuild a legacy child table.
+_TABLE_DDL = {
+    "criteria": _CRITERIA_DDL,
+    "candidates": _CANDIDATES_DDL,
+}
+
+# Idempotent indexes for the hot read paths (openings list, candidate
+# list, per-candidate evaluations/spans). Applied after _migrate so a
+# legacy database has its opening_id columns in place first.
+_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_candidates_opening
+    ON candidates(opening_id);
+CREATE INDEX IF NOT EXISTS idx_candidates_opening_file_hash
+    ON candidates(opening_id, file_hash);
+CREATE INDEX IF NOT EXISTS idx_candidates_opening_status
+    ON candidates(opening_id, status);
+CREATE INDEX IF NOT EXISTS idx_evidence_spans_candidate
+    ON evidence_spans(candidate_id);
+CREATE INDEX IF NOT EXISTS idx_evaluations_candidate
+    ON evaluations(candidate_id);
 """
 
 # (name, DDL) added to legacy tables when absent.
@@ -173,6 +213,10 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _file_digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _name_from_filename(filename: str) -> str:
     stem = re.sub(r"\.[^.]+$", "", filename)
     words = [
@@ -198,13 +242,26 @@ class SQLiteRepository:
         self._path = path
         self._db: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
+        # Callback used to requeue candidates after a criteria-changing
+        # patch; the worker pool registers its enqueue() here.
+        self._requeue: Callable[[str], None] | None = None
+
+    def set_requeue_hook(
+        self, hook: Callable[[str], None] | None
+    ) -> None:
+        """Register the callback that requeues candidates after a
+        criteria-changing opening patch (wired to worker enqueue)."""
+        self._requeue = hook
 
     async def open(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(self._path)
         self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA foreign_keys = ON")
+        await self._db.execute("PRAGMA journal_mode = WAL")
         await self._db.executescript(_SCHEMA)
         await self._migrate()
+        await self._db.executescript(_INDEXES)
         await self._backfill_file_hashes()
         await self._db.commit()
 
@@ -232,18 +289,47 @@ class SQLiteRepository:
         """Bring a legacy jobs-based database up to the openings schema.
 
         Runs inside a transaction so a mid-migration crash cannot leave a
-        half-migrated database.
+        half-migrated database. Foreign keys are suspended around it:
+        the legacy ``DROP TABLE jobs`` would otherwise trip the
+        ``REFERENCES jobs(id)`` declared on criteria/candidates rows.
+        (The pragma is a no-op inside a transaction, hence the toggle
+        happens outside BEGIN/COMMIT.)
         """
+        await self.db.execute("PRAGMA foreign_keys = OFF")
+        # Keep RENAME TABLE from rewriting REFERENCES clauses in other
+        # tables — children must keep pointing at `candidates`, not the
+        # temporary `_legacy` name, while we rebuild them.
+        await self.db.execute("PRAGMA legacy_alter_table = ON")
         await self.db.execute("BEGIN")
         try:
             tables = await self._table_names()
             if "jobs" in tables:
-                await self.db.execute(
+                cursor = await self.db.execute(
+                    "SELECT id, title, is_final FROM jobs"
+                )
+                await self.db.executemany(
                     "INSERT INTO openings (id, title, is_final, created_at) "
-                    "SELECT id, title, is_final, "
-                    "strftime('%Y-%m-%dT%H:%M:%fZ', 'now') FROM jobs"
+                    "VALUES (?, ?, ?, ?)",
+                    [
+                        (row["id"], row["title"], row["is_final"], _utcnow())
+                        for row in await cursor.fetchall()
+                    ],
                 )
                 await self.db.execute("DROP TABLE jobs")
+            # SQLite cannot re-target a declared REFERENCES jobs(id) —
+            # rebuild any child still pointing at the dropped/legacy
+            # jobs table, otherwise foreign_keys=ON would break every
+            # later INSERT into it ("no such table: main.jobs").
+            for table in ("criteria", "candidates"):
+                if table not in await self._table_names():
+                    continue
+                cursor = await self.db.execute(
+                    f"PRAGMA foreign_key_list({table})"
+                )
+                if "jobs" in {
+                    row["table"] for row in await cursor.fetchall()
+                }:
+                    await self._repoint_child_to_openings(table)
             for table in ("criteria", "candidates"):
                 columns = await self._columns(table)
                 if "job_id" in columns and "opening_id" not in columns:
@@ -281,9 +367,40 @@ class SQLiteRepository:
                     "WHERE evidence_span_ids IS NOT NULL "
                     "AND substr(evidence_span_ids, 1, 1) <> '['"
                 )
+            await self.db.commit()
         except Exception:
             await self.db.rollback()
             raise
+        finally:
+            await self.db.execute("PRAGMA foreign_keys = ON")
+            await self.db.execute("PRAGMA legacy_alter_table = OFF")
+
+    async def _repoint_child_to_openings(self, table: str) -> None:
+        """Rebuild a legacy child so REFERENCES jobs becomes openings.
+
+        Called inside the migration transaction. `job_id` columns are
+        mapped onto `opening_id`; every other legacy column that still
+        exists in the new schema is carried over.
+        """
+        legacy = f"{table}_legacy"
+        columns = await self._columns(table)
+        await self.db.execute(f"ALTER TABLE {table} RENAME TO {legacy}")
+        await self.db.execute(_TABLE_DDL[table])
+        current = await self._columns(table)
+        pairs = [
+            ("opening_id" if column == "job_id" else column, column)
+            for column in columns
+            if (
+                "opening_id" if column == "job_id" else column
+            ) in current
+        ]
+        await self.db.execute(
+            f"INSERT INTO {table} "
+            f"({', '.join(target for target, _ in pairs)}) "
+            f"SELECT {', '.join(source for _, source in pairs)} "
+            f"FROM {legacy}"
+        )
+        await self.db.execute(f"DROP TABLE {legacy}")
 
     async def _backfill_file_hashes(self) -> None:
         """Hash stored files for candidates that predate file_hash."""
@@ -295,9 +412,9 @@ class SQLiteRepository:
         updates = []
         for row in await cursor.fetchall():
             try:
-                digest = hashlib.sha256(
-                    Path(row["stored_path"]).read_bytes()
-                ).hexdigest()
+                digest = await asyncio.to_thread(
+                    _file_digest, Path(row["stored_path"])
+                )
             except OSError:
                 continue
             updates.append((digest, row["id"]))
@@ -368,10 +485,18 @@ class SQLiteRepository:
             ],
         )
 
-    async def _opening_from_row(self, row: aiosqlite.Row) -> Opening:
+    async def _opening_from_row(
+        self,
+        row: aiosqlite.Row,
+        criteria: list[Criterion] | None = None,
+        stats: tuple[int, int] | None = None,
+    ) -> Opening:
         opening_id = row["id"]
-        criteria = await self._opening_criteria(opening_id)
-        total, pending = await self._candidate_stats(opening_id)
+        if criteria is None:
+            criteria = await self._opening_criteria(opening_id)
+        if stats is None:
+            stats = await self._candidate_stats(opening_id)
+        total, pending = stats
         skills_raw = row["skills_json"]
         return Opening(
             id=opening_id,
@@ -437,6 +562,53 @@ class SQLiteRepository:
         row = await cursor.fetchone()
         return int(row["total"] or 0), int(row["pending"] or 0)
 
+    async def _criteria_for_openings(
+        self, opening_ids: list[str]
+    ) -> dict[str, list[Criterion]]:
+        """All criteria for the openings in one query, grouped + ordered."""
+        placeholders = ", ".join("?" for _ in opening_ids)
+        cursor = await self.db.execute(
+            "SELECT opening_id, criterion_id, name, description, weight, "
+            "required, suggested_weight, suggestion_confidence "
+            f"FROM criteria WHERE opening_id IN ({placeholders}) "
+            "ORDER BY opening_id, position",
+            opening_ids,
+        )
+        grouped: dict[str, list[Criterion]] = {}
+        for row in await cursor.fetchall():
+            grouped.setdefault(row["opening_id"], []).append(
+                Criterion(
+                    id=row["criterion_id"],
+                    name=row["name"],
+                    description=row["description"],
+                    weight=row["weight"],
+                    required=bool(row["required"]),
+                    suggested_weight=row["suggested_weight"],
+                    suggestion_confidence=row["suggestion_confidence"],
+                )
+            )
+        return grouped
+
+    async def _candidate_stats_for_openings(
+        self, opening_ids: list[str]
+    ) -> dict[str, tuple[int, int]]:
+        """(total, pending_review) per opening in one grouped query."""
+        placeholders = ", ".join("?" for _ in opening_ids)
+        cursor = await self.db.execute(
+            "SELECT opening_id, COUNT(*) AS total, "
+            "SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS pending "
+            f"FROM candidates WHERE opening_id IN ({placeholders}) "
+            "GROUP BY opening_id",
+            (CandidateStatus.NEEDS_REVIEW, *opening_ids),
+        )
+        return {
+            row["opening_id"]: (
+                int(row["total"] or 0),
+                int(row["pending"] or 0),
+            )
+            for row in await cursor.fetchall()
+        }
+
     async def get_opening(self, opening_id: str) -> Opening | None:
         cursor = await self.db.execute(
             "SELECT * FROM openings WHERE id = ?", (opening_id,)
@@ -456,10 +628,26 @@ class SQLiteRepository:
         cursor = await self.db.execute(
             "SELECT * FROM openings ORDER BY created_at DESC, id"
         )
-        return [await self._opening_from_row(row) for row in await cursor.fetchall()]
+        rows = await cursor.fetchall()
+        if not rows:
+            return []
+        opening_ids = [row["id"] for row in rows]
+        criteria = await self._criteria_for_openings(opening_ids)
+        stats = await self._candidate_stats_for_openings(opening_ids)
+        return [
+            await self._opening_from_row(
+                row,
+                criteria=criteria.get(row["id"], []),
+                stats=stats.get(row["id"], (0, 0)),
+            )
+            for row in rows
+        ]
 
     async def update_opening(
-        self, opening_id: str, patch: OpeningUpdate
+        self,
+        opening_id: str,
+        patch: OpeningUpdate,
+        requeue: Callable[[str], None] | None = None,
     ) -> Opening | None:
         fields = patch.model_fields_set
         assignments: list[str] = []
@@ -483,6 +671,8 @@ class SQLiteRepository:
             )
         if not assignments and "criteria" not in fields:
             return await self.get_opening(opening_id)
+        criteria_changed = "criteria" in fields and patch.criteria is not None
+        requeue_ids: list[str] = []
         async with self._write_lock:
             assignments.append("updated_at = ?")
             values.append(_utcnow())
@@ -490,16 +680,97 @@ class SQLiteRepository:
                 f"UPDATE openings SET {', '.join(assignments)} WHERE id = ?",
                 (*values, opening_id),
             )
-            if cursor.rowcount == 0:
-                await self.db.commit()
-                return None
-            if "criteria" in fields and patch.criteria is not None:
-                await self._replace_criteria(opening_id, patch.criteria)
-            await self.db.execute(
-                "UPDATE openings SET is_final = 0 WHERE id = ?", (opening_id,)
-            )
+            if cursor.rowcount:
+                if criteria_changed:
+                    requeue_ids = await self._apply_criteria_patch(
+                        opening_id, patch.criteria
+                    )
+                    # Evaluations were disturbed — the opening can no
+                    # longer be considered terminal. Non-criteria
+                    # patches never touch is_final.
+                    await self.db.execute(
+                        "UPDATE openings SET is_final = 0 WHERE id = ?",
+                        (opening_id,),
+                    )
             await self.db.commit()
+        if cursor.rowcount == 0:
+            return None
+        hook = requeue or self._requeue
+        if hook is not None:
+            for candidate_id in requeue_ids:
+                hook(candidate_id)
         return await self.get_opening(opening_id)
+
+    async def _apply_criteria_patch(
+        self, opening_id: str, criteria: list[Criterion]
+    ) -> list[str]:
+        """Swap the criteria set under an open write transaction.
+
+        Evaluation rows for removed criterion ids are dropped, totals
+        are recomputed from the surviving evals, and candidates that now
+        lack an eval for a current criterion are marked queued again —
+        their ids are returned so the caller (or the registered requeue
+        hook) can push them back into the worker pool.
+        """
+        cursor = await self.db.execute(
+            "SELECT criterion_id FROM criteria WHERE opening_id = ?",
+            (opening_id,),
+        )
+        removed = {
+            row["criterion_id"] for row in await cursor.fetchall()
+        } - {criterion.id for criterion in criteria}
+        await self._replace_criteria(opening_id, criteria)
+        if removed:
+            placeholders = ", ".join("?" for _ in removed)
+            await self.db.execute(
+                f"DELETE FROM evaluations "
+                f"WHERE criterion_id IN ({placeholders}) "
+                "AND candidate_id IN "
+                "(SELECT id FROM candidates WHERE opening_id = ?)",
+                (*removed, opening_id),
+            )
+        cursor = await self.db.execute(
+            "SELECT c.id FROM candidates c WHERE c.opening_id = ? "
+            "AND EXISTS ("
+            "  SELECT 1 FROM criteria cr WHERE cr.opening_id = c.opening_id "
+            "  AND NOT EXISTS ("
+            "    SELECT 1 FROM evaluations e "
+            "    WHERE e.candidate_id = c.id "
+            "    AND e.criterion_id = cr.criterion_id"
+            "  )"
+            ")",
+            (opening_id,),
+        )
+        requeue_ids = [row["id"] for row in await cursor.fetchall()]
+        if requeue_ids:
+            placeholders = ", ".join("?" for _ in requeue_ids)
+            await self.db.execute(
+                f"UPDATE candidates SET status = ?, error_message = NULL, "
+                f"retryable = 0, total_score = NULL "
+                f"WHERE id IN ({placeholders})",
+                (CandidateStatus.QUEUED, *requeue_ids),
+            )
+        # Recompute totals for candidates that kept full eval coverage.
+        from backend.app.scoring import (
+            calculate_total_score,
+            effective_fractions,
+        )
+
+        weights = {criterion.id: criterion.weight for criterion in criteria}
+        requeued = set(requeue_ids)
+        evaluations = await self._evaluations_for_opening(opening_id)
+        for candidate_id, evals in evaluations.items():
+            if candidate_id in requeued:
+                continue
+            total = calculate_total_score(
+                weights,
+                effective_fractions({e.criterion_id: e for e in evals}),
+            )
+            await self.db.execute(
+                "UPDATE candidates SET total_score = ? WHERE id = ?",
+                (total, candidate_id),
+            )
+        return requeue_ids
 
     # ---------- candidates ----------
 
@@ -727,13 +998,33 @@ class SQLiteRepository:
             await self.db.commit()
         return work_item
 
+    _EVALUATION_COLUMNS = (
+        "e.criterion_id, e.status, e.confidence, e.model_fraction, "
+        "e.evidence_span_ids, e.rationale, e.manual_fraction, "
+        "e.review_note, e.reviewed_by, e.reviewed_at"
+    )
+
+    @staticmethod
+    def _evaluation_from_row(row: aiosqlite.Row) -> CriterionEvaluation:
+        raw_ids = row["evidence_span_ids"]
+        return CriterionEvaluation(
+            criterion_id=row["criterion_id"],
+            status=MatchStatus(row["status"]),
+            confidence=row["confidence"],
+            model_fraction=row["model_fraction"],
+            evidence_span_ids=(json.loads(raw_ids) if raw_ids else []),
+            rationale=row["rationale"],
+            manual_fraction=row["manual_fraction"],
+            review_note=row["review_note"],
+            reviewed_by=row["reviewed_by"],
+            reviewed_at=row["reviewed_at"],
+        )
+
     async def _evaluations_for(
         self, candidate_id: str
     ) -> list[CriterionEvaluation]:
         cursor = await self.db.execute(
-            "SELECT e.criterion_id, e.status, e.confidence, e.model_fraction, "
-            "e.evidence_span_ids, e.rationale, e.manual_fraction, "
-            "e.review_note, e.reviewed_by, e.reviewed_at "
+            f"SELECT {self._EVALUATION_COLUMNS} "
             "FROM evaluations e "
             "JOIN candidates c ON c.id = e.candidate_id "
             "JOIN criteria cr ON cr.opening_id = c.opening_id "
@@ -741,40 +1032,35 @@ class SQLiteRepository:
             "WHERE e.candidate_id = ? ORDER BY cr.position",
             (candidate_id,),
         )
-        evaluations = []
-        for row in await cursor.fetchall():
-            raw_ids = row["evidence_span_ids"]
-            evaluations.append(
-                CriterionEvaluation(
-                    criterion_id=row["criterion_id"],
-                    status=MatchStatus(row["status"]),
-                    confidence=row["confidence"],
-                    model_fraction=row["model_fraction"],
-                    evidence_span_ids=(
-                        json.loads(raw_ids) if raw_ids else []
-                    ),
-                    rationale=row["rationale"],
-                    manual_fraction=row["manual_fraction"],
-                    review_note=row["review_note"],
-                    reviewed_by=row["reviewed_by"],
-                    reviewed_at=row["reviewed_at"],
-                )
-            )
-        return evaluations
+        return [
+            self._evaluation_from_row(row)
+            for row in await cursor.fetchall()
+        ]
 
-    async def get_candidate_result(
-        self, candidate_id: str
-    ) -> Candidate | None:
+    async def _evaluations_for_opening(
+        self, opening_id: str
+    ) -> dict[str, list[CriterionEvaluation]]:
+        """All evals for an opening's candidates in one grouped query."""
         cursor = await self.db.execute(
-            "SELECT id, opening_id, filename, preview_path, name, email, "
-            "mime_type, page_count, decision, uploaded_at, upload_order, "
-            "status, total_score, error_message, retryable "
-            "FROM candidates WHERE id = ?",
-            (candidate_id,),
+            f"SELECT e.candidate_id, {self._EVALUATION_COLUMNS} "
+            "FROM evaluations e "
+            "JOIN candidates c ON c.id = e.candidate_id "
+            "JOIN criteria cr ON cr.opening_id = c.opening_id "
+            "AND cr.criterion_id = e.criterion_id "
+            "WHERE c.opening_id = ? ORDER BY e.candidate_id, cr.position",
+            (opening_id,),
         )
-        row = await cursor.fetchone()
-        if row is None:
-            return None
+        grouped: dict[str, list[CriterionEvaluation]] = {}
+        for row in await cursor.fetchall():
+            grouped.setdefault(row["candidate_id"], []).append(
+                self._evaluation_from_row(row)
+            )
+        return grouped
+
+    @staticmethod
+    def _candidate_from_row(
+        row: aiosqlite.Row, evaluations: list[CriterionEvaluation]
+    ) -> Candidate:
         has_preview = bool(row["preview_path"])
         status = CandidateStatus(row["status"])
         return Candidate(
@@ -800,7 +1086,7 @@ class SQLiteRepository:
             status=status,
             upload_order=row["upload_order"],
             uploaded_at=row["uploaded_at"] or _utcnow(),
-            evaluations=await self._evaluations_for(candidate_id),
+            evaluations=evaluations,
             total_score=row["total_score"],
             is_final=status == CandidateStatus.COMPLETE,
             decision=CandidateDecision(row["decision"] or "undecided"),
@@ -808,18 +1094,43 @@ class SQLiteRepository:
             retryable=bool(row["retryable"]),
         )
 
+    _CANDIDATE_RESULT_COLUMNS = (
+        "id, opening_id, filename, preview_path, name, email, "
+        "mime_type, page_count, decision, uploaded_at, upload_order, "
+        "status, total_score, error_message, retryable"
+    )
+
+    async def get_candidate_result(
+        self, candidate_id: str
+    ) -> Candidate | None:
+        cursor = await self.db.execute(
+            f"SELECT {self._CANDIDATE_RESULT_COLUMNS} "
+            "FROM candidates WHERE id = ?",
+            (candidate_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._candidate_from_row(
+            row, await self._evaluations_for(candidate_id)
+        )
+
     async def list_candidates(self, opening_id: str) -> list[Candidate]:
         cursor = await self.db.execute(
-            "SELECT id FROM candidates WHERE opening_id = ? "
-            "ORDER BY upload_order",
+            f"SELECT {self._CANDIDATE_RESULT_COLUMNS} "
+            "FROM candidates WHERE opening_id = ? ORDER BY upload_order",
             (opening_id,),
         )
-        candidates = []
-        for row in await cursor.fetchall():
-            result = await self.get_candidate_result(row["id"])
-            if result is not None:
-                candidates.append(result)
-        return candidates
+        rows = await cursor.fetchall()
+        if not rows:
+            return []
+        evaluations = await self._evaluations_for_opening(opening_id)
+        return [
+            self._candidate_from_row(
+                row, evaluations.get(row["id"], [])
+            )
+            for row in rows
+        ]
 
     async def update_manual_evaluation(
         self,
@@ -850,9 +1161,11 @@ class SQLiteRepository:
                 ),
             )
             if cursor.rowcount == 0:
+                await self.db.commit()
                 return None
             work_item = await self.get_candidate(candidate_id)
             if work_item is None:
+                await self.db.commit()
                 return None
             evaluations = await self._evaluations_for(candidate_id)
             weights = {c.id: c.weight for c in work_item.criteria}
@@ -884,11 +1197,115 @@ class SQLiteRepository:
                 "UPDATE candidates SET decision = ? WHERE id = ?",
                 (decision, candidate_id),
             )
-            if cursor.rowcount == 0:
-                await self.db.commit()
-                return None
+            updated = cursor.rowcount > 0
             await self.db.commit()
+        if not updated:
+            return None
         return await self.get_candidate_result(candidate_id)
+
+    async def bulk_set_decision(
+        self, opening_id: str, candidate_ids: list[str], decision: str
+    ) -> int:
+        """Set decision for the listed candidates of one opening.
+
+        Unknown ids (or ids belonging to another opening) are skipped.
+        Returns the number of rows updated.
+        """
+        if not candidate_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in candidate_ids)
+        async with self._write_lock:
+            cursor = await self.db.execute(
+                f"UPDATE candidates SET decision = ? "
+                f"WHERE opening_id = ? AND id IN ({placeholders})",
+                (str(decision), opening_id, *candidate_ids),
+            )
+            updated = cursor.rowcount
+            await self.db.commit()
+        return updated
+
+    async def delete_candidate(self, candidate_id: str) -> tuple[str, ...] | None:
+        """Delete evaluations, evidence_spans and the candidate row.
+
+        Returns (stored_path, preview_path, opening_id) so callers can
+        unlink files and republish progress, or None if missing.
+        """
+        async with self._write_lock:
+            cursor = await self.db.execute(
+                "SELECT stored_path, preview_path, opening_id "
+                "FROM candidates WHERE id = ?",
+                (candidate_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            paths = (
+                row["stored_path"],
+                row["preview_path"],
+                row["opening_id"],
+            )
+            await self.db.execute(
+                "DELETE FROM evaluations WHERE candidate_id = ?",
+                (candidate_id,),
+            )
+            await self.db.execute(
+                "DELETE FROM evidence_spans WHERE candidate_id = ?",
+                (candidate_id,),
+            )
+            await self.db.execute(
+                "DELETE FROM candidates WHERE id = ?", (candidate_id,)
+            )
+            await self.db.commit()
+        return paths
+
+    async def delete_opening(
+        self, opening_id: str
+    ) -> list[tuple[str, str | None]] | None:
+        """Delete the opening and all child rows in one transaction.
+
+        Returns [(stored_path, preview_path), ...] for file cleanup —
+        preview_path may be None — or None if the opening is missing.
+        """
+        async with self._write_lock:
+            cursor = await self.db.execute(
+                "SELECT 1 FROM openings WHERE id = ?", (opening_id,)
+            )
+            if await cursor.fetchone() is None:
+                return None
+            cursor = await self.db.execute(
+                "SELECT stored_path, preview_path FROM candidates "
+                "WHERE opening_id = ?",
+                (opening_id,),
+            )
+            paths = [
+                (row["stored_path"], row["preview_path"])
+                for row in await cursor.fetchall()
+            ]
+            # Manual cascade — keeps working on databases that predate
+            # PRAGMA foreign_keys, and children must go before parents.
+            await self.db.execute(
+                "DELETE FROM evaluations WHERE candidate_id IN "
+                "(SELECT id FROM candidates WHERE opening_id = ?)",
+                (opening_id,),
+            )
+            await self.db.execute(
+                "DELETE FROM evidence_spans WHERE candidate_id IN "
+                "(SELECT id FROM candidates WHERE opening_id = ?)",
+                (opening_id,),
+            )
+            await self.db.execute(
+                "DELETE FROM candidates WHERE opening_id = ?",
+                (opening_id,),
+            )
+            await self.db.execute(
+                "DELETE FROM criteria WHERE opening_id = ?",
+                (opening_id,),
+            )
+            await self.db.execute(
+                "DELETE FROM openings WHERE id = ?", (opening_id,)
+            )
+            await self.db.commit()
+        return paths
 
     async def candidate_counts(self, opening_id: str) -> tuple[int, int]:
         cursor = await self.db.execute(

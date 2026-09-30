@@ -1,17 +1,24 @@
+import asyncio
 import hashlib
+import inspect
 import json
+import logging
 import uuid
-from collections.abc import AsyncIterator
+import zipfile
+from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import Field
 
 from backend.app.auth import current_username, require_session
 from backend.app.documents import UnsupportedFile, validate_upload
 from backend.app.schemas import (
+    ApiModel,
     BatchUploadResponse,
     Candidate,
+    CandidateDecision,
     CriteriaSuggestionRequest,
     CriteriaSuggestionResponse,
     DecisionUpdate,
@@ -27,11 +34,24 @@ from backend.app.schemas import (
     WeightSuggestionResponse,
 )
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api", dependencies=[Depends(require_session)])
 
 _MATCH_LEVEL_FRACTION = {"not_found": 0.0, "partial": 0.5, "strong": 1.0}
 _CHUNK_SIZE = 1 << 20
 _IMPORT_SUFFIXES = {".pdf", ".docx", ".png", ".jpg", ".jpeg", ".webp"}
+_SSE_HEARTBEAT_SECONDS = 15
+_STREAM_END_EVENTS = {"opening.complete", "opening.deleted"}
+
+
+class BulkDecisionUpdate(ApiModel):
+    candidate_ids: list[str] = Field(default_factory=list)
+    decision: CandidateDecision
+
+
+class BulkDecisionResponse(ApiModel):
+    updated: int
 
 
 def _repository(request: Request):
@@ -69,6 +89,41 @@ async def _store_upload(
     return hasher.hexdigest()
 
 
+def _unlink_paths(paths: Iterable[str | Path | None]) -> None:
+    """Best-effort unlink; missing files are fine, the rest get logged."""
+    seen: set[str] = set()
+    for raw in paths:
+        if not raw:
+            continue
+        key = str(raw)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            Path(key).unlink(missing_ok=True)
+        except OSError:
+            log.warning("Could not delete stored file %s", key, exc_info=True)
+
+
+def _worker_pool(request: Request):
+    return getattr(request.app.state, "worker_pool", None)
+
+
+def _discard_pending(request: Request, candidate_ids: Iterable[str]) -> None:
+    pool = _worker_pool(request)
+    discard = getattr(pool, "discard_pending", None)
+    if discard is None:
+        return
+    for candidate_id in candidate_ids:
+        discard(candidate_id)
+
+
+async def _close_opening_stream(hub, opening_id: str) -> None:
+    result = hub.close_opening(opening_id)
+    if inspect.isawaitable(result):
+        await result
+
+
 @router.post("/weight-suggestions", response_model=WeightSuggestionResponse)
 async def suggest_weights(
     body: WeightSuggestionRequest, request: Request
@@ -79,7 +134,10 @@ async def suggest_weights(
     try:
         suggestions = await evaluator.suggest_weights(body.criteria)
     except RetryableEvaluationError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+        log.warning("Weight suggestion failed: %s", error)
+        raise HTTPException(
+            status_code=502, detail="Suggestion request failed"
+        ) from error
     return WeightSuggestionResponse(suggestions=suggestions)
 
 
@@ -93,7 +151,10 @@ async def suggest_criteria(
     try:
         suggestions = await evaluator.suggest_criteria(body)
     except RetryableEvaluationError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+        log.warning("Criteria suggestion failed: %s", error)
+        raise HTTPException(
+            status_code=502, detail="Suggestion request failed"
+        ) from error
     return CriteriaSuggestionResponse(suggestions=suggestions)
 
 
@@ -106,7 +167,10 @@ async def create_opening(body: OpeningCreate, request: Request) -> Opening:
     opening_id = uuid.uuid4().hex
     await repository.create_opening(opening_id, body)
     opening = await repository.get_opening(opening_id)
-    assert opening is not None
+    if opening is None:
+        raise HTTPException(
+            status_code=500, detail="Opening could not be loaded"
+        )
     return opening
 
 
@@ -133,6 +197,25 @@ async def update_opening(
     return updated
 
 
+@router.delete("/openings/{opening_id}", status_code=204)
+async def delete_opening(opening_id: str, request: Request) -> None:
+    repository = _repository(request)
+    # Capture candidate ids up front so queued worker items can be
+    # discarded once the rows are gone.
+    candidate_ids = [
+        candidate.id
+        for candidate in await repository.list_candidates(opening_id)
+    ]
+    file_paths = await repository.delete_opening(opening_id)
+    if file_paths is None:
+        raise HTTPException(status_code=404, detail="Unknown opening")
+    await asyncio.to_thread(
+        _unlink_paths, (path for pair in file_paths for path in pair)
+    )
+    _discard_pending(request, candidate_ids)
+    await _close_opening_stream(request.app.state.event_hub, opening_id)
+
+
 # ---------- listing import ----------
 
 
@@ -145,6 +228,61 @@ def _importer(request: Request):
             "(set OPENROUTER_API_KEY or SMARTCV_FAKE_IMPORTER=true)",
         )
     return importer
+
+
+def _import_http_error(error: Exception) -> HTTPException:
+    """Map importer failures to generic responses; internals stay in logs."""
+    from backend.app.importer import (
+        ImporterUnavailable,
+        ListingNotReadable,
+    )
+
+    if isinstance(error, ImporterUnavailable):
+        status_code, detail = 503, "Listing import is unavailable"
+    elif isinstance(error, ListingNotReadable):
+        status_code, detail = 422, "Listing import failed"
+    else:  # ImportProviderError
+        status_code, detail = 502, "Listing import failed"
+    log.warning(
+        "Listing import failed (%s): %s", type(error).__name__, error
+    )
+    return HTTPException(status_code=status_code, detail=detail)
+
+
+def _validate_import_signature(path: Path, suffix: str) -> None:
+    """Magic-byte check for staged listing files, per _IMPORT_SUFFIXES."""
+    with open(path, "rb") as handle:
+        header = handle.read(1024)
+    if suffix == ".pdf":
+        valid = b"%PDF-" in header
+    elif suffix == ".docx":
+        valid = _is_docx(path)
+    elif suffix == ".png":
+        valid = header.startswith(b"\x89PNG\r\n\x1a\n")
+    elif suffix in {".jpg", ".jpeg"}:
+        valid = header.startswith(b"\xff\xd8\xff")
+    elif suffix == ".webp":
+        valid = (
+            len(header) >= 12
+            and header[:4] == b"RIFF"
+            and header[8:12] == b"WEBP"
+        )
+    else:
+        valid = False
+    if not valid:
+        raise UnsupportedFile(
+            f"File content does not match '{suffix or '(none)'}'"
+        )
+
+
+def _is_docx(path: Path) -> bool:
+    if not zipfile.is_zipfile(path):
+        return False
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return "word/document.xml" in set(archive.namelist())
+    except zipfile.BadZipFile:
+        return False
 
 
 @router.post("/openings/import/link", response_model=ImportDraft)
@@ -161,12 +299,8 @@ async def import_link(
     importer = _importer(request)
     try:
         return await importer.import_listing(ImportSource.link(body.url))
-    except ImporterUnavailable as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
-    except ListingNotReadable as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-    except ImportProviderError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+    except (ImporterUnavailable, ListingNotReadable, ImportProviderError) as error:
+        raise _import_http_error(error) from error
 
 
 @router.post("/openings/import/file", response_model=ImportDraft)
@@ -194,21 +328,33 @@ async def import_file(request: Request, file: UploadFile = File(...)):
     staging.mkdir(parents=True, exist_ok=True)
     staged = staging / f"{uuid.uuid4().hex}{suffix}"
     try:
-        await _store_upload(file, staged, settings.max_file_bytes)
+        try:
+            await _store_upload(file, staged, settings.max_file_bytes)
+        except UnsupportedFile as error:
+            raise HTTPException(
+                status_code=413, detail=str(error)
+            ) from error
+        try:
+            await asyncio.to_thread(
+                _validate_import_signature, staged, suffix
+            )
+        except UnsupportedFile as error:
+            raise HTTPException(
+                status_code=415, detail=str(error)
+            ) from error
         source = ImportSource.file(
             staged, filename, file.content_type or "application/octet-stream"
         )
-        return await importer.import_listing(source)
-    except ImporterUnavailable as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
-    except ListingNotReadable as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-    except ImportProviderError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
-    except UnsupportedFile as error:
-        raise HTTPException(status_code=413, detail=str(error)) from error
+        try:
+            return await importer.import_listing(source)
+        except (
+            ImporterUnavailable,
+            ListingNotReadable,
+            ImportProviderError,
+        ) as error:
+            raise _import_http_error(error) from error
     finally:
-        staged.unlink(missing_ok=True)
+        await asyncio.to_thread(_unlink_paths, (staged,))
 
 
 # ---------- candidates ----------
@@ -238,6 +384,8 @@ async def upload_candidates(
     queued: list[str] = []
     batch_ids: list[str] = []
     duplicate_ids: list[str] = []
+    failures: dict[str, str] = {}
+    new_items: list[dict] = []
     seen_hashes: dict[str, str] = {}
     for upload_order, file in enumerate(files):
         candidate_id = uuid.uuid4().hex
@@ -257,7 +405,7 @@ async def upload_candidates(
             )
         except UnsupportedFile as exc:
             error = str(exc)
-            stored_path.unlink(missing_ok=True)
+            await asyncio.to_thread(_unlink_paths, (stored_path,))
         if error is None and file_hash is not None:
             duplicate_id = seen_hashes.get(
                 file_hash
@@ -265,37 +413,50 @@ async def upload_candidates(
                 opening_id, file_hash
             )
             if duplicate_id is not None:
-                stored_path.unlink(missing_ok=True)
+                await asyncio.to_thread(_unlink_paths, (stored_path,))
                 duplicate_ids.append(duplicate_id)
                 continue
             seen_hashes[file_hash] = candidate_id
             try:
-                validate_upload(
-                    stored_path, filename, settings.max_file_bytes
+                await asyncio.to_thread(
+                    validate_upload,
+                    stored_path,
+                    filename,
+                    settings.max_file_bytes,
                 )
             except UnsupportedFile as exc:
                 error = str(exc)
-                stored_path.unlink(missing_ok=True)
-        await repository.add_candidates(
-            opening_id,
-            [
-                {
-                    "id": candidate_id,
-                    "filename": filename,
-                    "stored_path": str(stored_path),
-                    "upload_order": upload_order,
-                    "mime_type": file.content_type,
-                    "file_hash": file_hash,
-                }
-            ],
+                await asyncio.to_thread(_unlink_paths, (stored_path,))
+        new_items.append(
+            {
+                "id": candidate_id,
+                "filename": filename,
+                "stored_path": str(stored_path),
+                "upload_order": upload_order,
+                "mime_type": file.content_type,
+                "file_hash": file_hash,
+            }
         )
         batch_ids.append(candidate_id)
         if error is None:
             queued.append(candidate_id)
         else:
-            await repository.mark_candidate_failed(
-                candidate_id, error, retryable=False
+            failures[candidate_id] = error
+    # Single commit for the whole batch; on failure every file written
+    # above is an orphan and must be removed (no rows landed).
+    if new_items:
+        try:
+            await repository.add_candidates(opening_id, new_items)
+        except Exception:
+            await asyncio.to_thread(
+                _unlink_paths,
+                (item["stored_path"] for item in new_items),
             )
+            raise
+    for candidate_id, error in failures.items():
+        await repository.mark_candidate_failed(
+            candidate_id, error, retryable=False
+        )
     if queued:
         pool = request.app.state.worker_pool
         for candidate_id in queued:
@@ -306,7 +467,10 @@ async def upload_candidates(
     results = []
     for candidate_id in batch_ids:
         result = await repository.get_candidate_result(candidate_id)
-        assert result is not None
+        if result is None:
+            raise HTTPException(
+                status_code=500, detail="Uploaded candidate is missing"
+            )
         results.append(result)
     duplicates = []
     for candidate_id in duplicate_ids:
@@ -332,20 +496,80 @@ async def list_candidates(
     return await repository.list_candidates(opening_id)
 
 
+@router.delete(
+    "/openings/{opening_id}/candidates/{candidate_id}", status_code=204
+)
+async def delete_candidate(
+    opening_id: str, candidate_id: str, request: Request
+) -> None:
+    repository = _repository(request)
+    work_item = await repository.get_candidate(candidate_id)
+    if work_item is None or work_item.opening_id != opening_id:
+        raise HTTPException(status_code=404, detail="Unknown candidate")
+    deleted = await repository.delete_candidate(candidate_id)
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="Unknown candidate")
+    stored_path, preview_path, _opening_id = deleted
+    await asyncio.to_thread(_unlink_paths, (stored_path, preview_path))
+    _discard_pending(request, (candidate_id,))
+    publisher = request.app.state.event_publisher
+    publisher.publish_candidate_deleted(opening_id, candidate_id)
+    # publish_opening_progress also runs the terminal check, which may
+    # emit opening.complete when this was the last non-terminal row.
+    await publisher.publish_opening_progress(opening_id)
+
+
+@router.post(
+    "/openings/{opening_id}/candidates/bulk-decision",
+    response_model=BulkDecisionResponse,
+)
+async def bulk_decide_candidates(
+    opening_id: str, body: BulkDecisionUpdate, request: Request
+) -> BulkDecisionResponse:
+    repository = _repository(request)
+    if not await repository.opening_exists(opening_id):
+        raise HTTPException(status_code=404, detail="Unknown opening")
+    updated = await repository.bulk_set_decision(
+        opening_id, body.candidate_ids, body.decision
+    )
+    await request.app.state.event_publisher.publish_candidates_updated(
+        opening_id, body.candidate_ids
+    )
+    return BulkDecisionResponse(updated=updated)
+
+
 async def opening_event_stream(
     repository, hub, opening_id: str
 ) -> AsyncIterator[str]:
     async with hub.subscribe(opening_id) as subscriber:
         snapshot = await repository.get_opening_snapshot(opening_id)
+        if snapshot is None:
+            # Opening was deleted between the route check and now —
+            # close the stream instead of crashing on model_dump.
+            return
         yield _encode_sse(
             "snapshot", snapshot.model_dump(mode="json", by_alias=True)
         )
         if snapshot.opening.is_final:
             return
-        async for event in subscriber:
-            yield _encode_sse(event.name, event.payload)
-            if event.name == "opening.complete":
-                break
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    anext(subscriber), timeout=_SSE_HEARTBEAT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                yield ": hb\n\n"
+                continue
+            except StopAsyncIteration:
+                # Hub closed the subscriber (e.g. opening deleted).
+                return
+            name = getattr(event, "name", None)
+            if name is None or name == "close":
+                # Close sentinel from the hub — end the stream.
+                return
+            yield _encode_sse(name, event.payload)
+            if name in _STREAM_END_EVENTS:
+                return
 
 
 @router.get("/openings/{opening_id}/events")
@@ -471,5 +695,8 @@ async def retry_candidate(
         )
     request.app.state.worker_pool.enqueue(candidate_id)
     result = await repository.get_candidate_result(candidate_id)
-    assert result is not None
+    if result is None:
+        raise HTTPException(
+            status_code=500, detail="Candidate result is missing"
+        )
     return result

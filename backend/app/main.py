@@ -14,6 +14,9 @@ from backend.app.reviewer import create_reviewer
 from backend.app.typesafe_adapter import create_evaluator
 from backend.app.worker import CandidateWorkerPool
 
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
 _LOCAL_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -37,6 +40,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         logging.getLogger("typesafe_sdk").setLevel(logging.WARNING)
+        if not settings.auth_enabled:
+            log.warning(
+                "SMARTCV_ACCOUNTS is empty — session auth is DISABLED; "
+                "every /api route is publicly accessible. Configure it to "
+                "require login."
+            )
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         settings.uploads_dir.mkdir(parents=True, exist_ok=True)
         settings.previews_dir.mkdir(parents=True, exist_ok=True)
@@ -71,6 +80,7 @@ def create_app(
             event_publisher=publisher,
             worker_count=settings.worker_count,
             reviewer=active_reviewer,
+            settings=settings,
         )
         app.state.repository = repository
         app.state.evaluator = active_evaluator

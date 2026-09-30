@@ -6,7 +6,7 @@
 
 // ---------- Openings ----------
 
-export type OpeningStatus = "draft" | "open" | "closed"
+export type OpeningStatus = "draft" | "open" | "closed" | "archived"
 
 export type EmploymentType =
   | "full_time"
@@ -81,6 +81,11 @@ export type CandidateStatus =
 
 /** The recruiter's call — the tool never auto-rejects. */
 export type CandidateDecision = "undecided" | "shortlisted" | "passed"
+
+/** Response of POST /api/openings/{id}/candidates/bulk-decision. */
+export interface BulkDecisionResult {
+  updated: number
+}
 
 export interface CandidateFile {
   filename: string

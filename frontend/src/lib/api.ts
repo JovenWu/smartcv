@@ -1,4 +1,13 @@
-import type { Opening, OpeningSource } from "@/types"
+import { clearSession } from "@/lib/auth"
+import type {
+  BulkDecisionResult,
+  Candidate,
+  CandidateDecision,
+  EvidenceSpan,
+  Opening,
+  OpeningSource,
+  OpeningStatus,
+} from "@/types"
 
 /**
  * Thin fetch wrapper — unwraps FastAPI `{detail}` error bodies and returns
@@ -15,13 +24,39 @@ async function parseError(response: Response): Promise<Error> {
   return new Error(detail)
 }
 
+/**
+ * `init` flows straight to fetch — pass `{ signal }` to abort. Resolves
+ * `undefined` for 204/empty-body endpoints; on 401 the session is dropped
+ * and the app redirects to /login (unless already there), then throws so
+ * the caller still aborts its own flow.
+ */
 export async function apiFetch<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
   const response = await fetch(path, init)
+  if (
+    response.status === 401 &&
+    typeof window !== "undefined" &&
+    window.location.pathname !== "/login"
+  ) {
+    clearSession()
+    window.location.assign("/login")
+  }
   if (!response.ok) throw await parseError(response)
-  return (await response.json()) as T
+  if (
+    response.status === 204 ||
+    response.headers.get("content-length") === "0"
+  ) {
+    return undefined as T
+  }
+  try {
+    return (await response.json()) as T
+  } catch (err) {
+    // OK status with an empty/non-JSON body — treat like a 204.
+    if (err instanceof SyntaxError) return undefined as T
+    throw err
+  }
 }
 
 function jsonPost<T>(path: string, body: unknown): Promise<T> {
@@ -57,6 +92,7 @@ export interface NewOpeningPayload {
   closesAt?: string
   source?: OpeningSource
   criteria?: NewCriterionPayload[]
+  status?: OpeningStatus
 }
 
 export interface ImportCriterion {
@@ -120,12 +156,14 @@ export const openingsApi = {
   list: () => apiFetch<Opening[]>("/api/openings"),
   create: (input: NewOpeningPayload) =>
     jsonPost<Opening>("/api/openings", input),
-  update: (id: string, input: NewOpeningPayload) =>
+  update: (id: string, input: Partial<NewOpeningPayload>) =>
     apiFetch<Opening>(`/api/openings/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     }),
+  remove: (id: string) =>
+    apiFetch<void>(`/api/openings/${id}`, { method: "DELETE" }),
   importLink: (url: string) =>
     jsonPost<ImportDraft>("/api/openings/import/link", { url }),
   importFile: (file: File) => {
@@ -140,5 +178,67 @@ export const openingsApi = {
     jsonPost<CriteriaSuggestionResponse>(
       "/api/criteria-suggestions",
       request,
+    ),
+}
+
+/** PATCH body for the per-criterion review endpoint. */
+export interface CriterionReview {
+  matchLevel: "strong" | "partial" | "not_found"
+  reviewNote?: string
+}
+
+export const candidatesApi = {
+  list: (openingId: string) =>
+    apiFetch<Candidate[]>(`/api/openings/${openingId}/candidates`),
+  remove: (openingId: string, candidateId: string) =>
+    apiFetch<void>(
+      `/api/openings/${openingId}/candidates/${candidateId}`,
+      { method: "DELETE" },
+    ),
+  setDecision: (
+    openingId: string,
+    candidateId: string,
+    decision: CandidateDecision,
+  ) =>
+    apiFetch<Candidate>(
+      `/api/openings/${openingId}/candidates/${candidateId}/decision`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision }),
+      },
+    ),
+  bulkSetDecision: (
+    openingId: string,
+    candidateIds: string[],
+    decision: CandidateDecision,
+  ) =>
+    jsonPost<BulkDecisionResult>(
+      `/api/openings/${openingId}/candidates/bulk-decision`,
+      { candidateIds, decision },
+    ),
+  retry: (openingId: string, candidateId: string) =>
+    apiFetch<Candidate>(
+      `/api/openings/${openingId}/candidates/${candidateId}/retry`,
+      { method: "POST" },
+    ),
+  reviewCriterion: (
+    openingId: string,
+    candidateId: string,
+    criterionId: string,
+    review: CriterionReview,
+  ) =>
+    apiFetch<Candidate>(
+      `/api/openings/${openingId}/candidates/${candidateId}`
+        + `/criteria/${criterionId}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(review),
+      },
+    ),
+  spans: (openingId: string, candidateId: string) =>
+    apiFetch<EvidenceSpan[]>(
+      `/api/openings/${openingId}/candidates/${candidateId}/spans`,
     ),
 }

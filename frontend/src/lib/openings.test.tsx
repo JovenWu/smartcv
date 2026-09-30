@@ -1,9 +1,12 @@
-import { renderHook, waitFor } from "@testing-library/react"
+import { act, renderHook, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   addOpening,
   mergeSuggestions,
+  refreshOpeningsSoon,
+  removeOpening,
+  setOpeningArchived,
   updateOpening,
   useOpenings,
   useOpeningsStatus,
@@ -163,6 +166,107 @@ describe("updateOpening", () => {
     await waitFor(() =>
       expect(result.current[0].title).toBe("Senior PM"),
     )
+  })
+})
+
+describe("removeOpening", () => {
+  it("issues DELETE and refreshes the list", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([OPENING]), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([]), { status: 200 }),
+      )
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useOpenings())
+    await waitFor(() => expect(result.current).toHaveLength(1))
+    await act(async () => {
+      await removeOpening("x")
+    })
+    const [path, init] = fetchMock.mock.calls[1]
+    expect(path).toBe("/api/openings/x")
+    expect(init?.method).toBe("DELETE")
+    expect(fetchMock.mock.calls[2][0]).toBe("/api/openings")
+    expect(result.current).toHaveLength(0)
+  })
+})
+
+describe("setOpeningArchived", () => {
+  it("patches status to archived and refreshes", async () => {
+    const archived = { ...OPENING, status: "archived" }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([OPENING]), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(archived), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([archived]), { status: 200 }),
+      )
+    vi.stubGlobal("fetch", fetchMock)
+    const { result } = renderHook(() => useOpenings())
+    await waitFor(() => expect(result.current).toHaveLength(1))
+    await act(async () => {
+      await setOpeningArchived("x", true)
+    })
+    const [path, init] = fetchMock.mock.calls[1]
+    expect(path).toBe("/api/openings/x")
+    expect(init?.method).toBe("PATCH")
+    expect(JSON.parse(init?.body as string)).toEqual({
+      status: "archived",
+    })
+    await waitFor(() =>
+      expect(result.current[0].status).toBe("archived"),
+    )
+  })
+
+  it("patches status back to open when unarchiving", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ...OPENING, status: "open" }), {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([OPENING]), { status: 200 }),
+      )
+    vi.stubGlobal("fetch", fetchMock)
+    await act(async () => {
+      await setOpeningArchived("x", false)
+    })
+    const [path, init] = fetchMock.mock.calls[0]
+    expect(path).toBe("/api/openings/x")
+    expect(JSON.parse(init?.body as string)).toEqual({ status: "open" })
+  })
+})
+
+describe("refreshOpeningsSoon", () => {
+  it("collapses a burst of calls into a single list fetch", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify([OPENING]), { status: 200 }),
+      )
+    vi.stubGlobal("fetch", fetchMock)
+    vi.useFakeTimers()
+    try {
+      refreshOpeningsSoon()
+      refreshOpeningsSoon()
+      refreshOpeningsSoon()
+      await vi.advanceTimersByTimeAsync(600)
+      const listCalls = fetchMock.mock.calls.filter(
+        (call) => String(call[0]) === "/api/openings",
+      )
+      expect(listCalls).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

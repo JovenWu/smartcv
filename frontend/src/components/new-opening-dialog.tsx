@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import {
   ArrowRightIcon,
   ChevronLeftIcon,
@@ -9,7 +9,11 @@ import { useNavigate } from "react-router-dom"
 
 import { ImportOpeningForm } from "@/components/import-opening-form"
 import { ManualOpeningForm } from "@/components/manual-opening-form"
-import type { NewOpeningInput } from "@/lib/openings"
+import {
+  addOpening,
+  type NewOpeningInput,
+  type Opening,
+} from "@/lib/openings"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -77,18 +81,28 @@ export function NewOpeningDialog({
   const navigate = useNavigate()
   const [view, setView] = useState<View>("choose")
   const [draft, setDraft] = useState<Partial<NewOpeningInput>>()
+  const createdRef = useRef<Opening | null>(null)
 
   const handleOpenChange = (next: boolean) => {
     if (next) {
       setView("choose")
       setDraft(undefined)
+      createdRef.current = null
     }
     onOpenChange(next)
   }
 
+  // The form's onDone carries no payload — stash the created opening so
+  // we can land on its detail page instead of back at the list.
+  const createOpening = async (input: NewOpeningInput) => {
+    createdRef.current = await addOpening(input)
+  }
+
   const done = () => {
     onOpenChange(false)
-    navigate("/")
+    const created = createdRef.current
+    createdRef.current = null
+    navigate(created ? created.url : "/")
   }
 
   return (
@@ -145,9 +159,20 @@ export function NewOpeningDialog({
           />
         )}
         {view === "review" && (
-          <ManualOpeningForm key="review" initial={draft} onDone={done} />
+          <ManualOpeningForm
+            key="review"
+            initial={draft}
+            onSubmit={createOpening}
+            onDone={done}
+          />
         )}
-        {view === "manual" && <ManualOpeningForm key="manual" onDone={done} />}
+        {view === "manual" && (
+          <ManualOpeningForm
+            key="manual"
+            onSubmit={createOpening}
+            onDone={done}
+          />
+        )}
       </DialogContent>
     </Dialog>
   )

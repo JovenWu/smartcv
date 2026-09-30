@@ -4,6 +4,13 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
+# Per-subscriber backlog cap — a stalled SSE client must not grow
+# memory unboundedly; on overflow it is dropped (sentinel-closed).
+_SUBSCRIBER_QUEUE_MAX = 256
+
+# Enqueued into a subscriber queue to terminate its async iterator.
+_CLOSE = object()
+
 
 @dataclass(frozen=True)
 class OpeningEvent:
@@ -12,27 +19,32 @@ class OpeningEvent:
 
 
 class _Subscriber:
-    def __init__(self, queue: asyncio.Queue[OpeningEvent]) -> None:
+    def __init__(self, queue: asyncio.Queue) -> None:
         self._queue = queue
 
     def __aiter__(self) -> "_Subscriber":
         return self
 
     async def __anext__(self) -> OpeningEvent:
-        return await self._queue.get()
+        item = await self._queue.get()
+        if item is _CLOSE:
+            raise StopAsyncIteration
+        return item
 
 
 class EventHub:
     """Process-local fan-out of opening events to SSE subscribers."""
 
     def __init__(self) -> None:
-        self._subscribers: dict[str, set[asyncio.Queue[OpeningEvent]]] = {}
+        self._subscribers: dict[str, set[asyncio.Queue]] = {}
 
     @asynccontextmanager
     async def subscribe(
         self, opening_id: str
     ) -> AsyncIterator[AsyncIterator[OpeningEvent]]:
-        queue: asyncio.Queue[OpeningEvent] = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(
+            maxsize=_SUBSCRIBER_QUEUE_MAX
+        )
         subscribers = self._subscribers.setdefault(opening_id, set())
         subscribers.add(queue)
         try:
@@ -42,9 +54,41 @@ class EventHub:
             if not subscribers:
                 self._subscribers.pop(opening_id, None)
 
+    @staticmethod
+    def _offer(queue: asyncio.Queue, item: Any) -> None:
+        """put_nowait that evicts the oldest queued item when full."""
+        try:
+            queue.put_nowait(item)
+        except asyncio.QueueFull:
+            # The queue is full, so this always frees a slot.
+            queue.get_nowait()
+            queue.put_nowait(item)
+
     def publish(self, opening_id: str, event: OpeningEvent) -> None:
-        for queue in list(self._subscribers.get(opening_id, ())):
-            queue.put_nowait(event)
+        queues = self._subscribers.get(opening_id)
+        if not queues:
+            return
+        for queue in list(queues):
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                # Slow consumer: drop it instead of growing the queue.
+                queues.discard(queue)
+                self._offer(queue, _CLOSE)
+        if not queues:
+            self._subscribers.pop(opening_id, None)
+
+    def close_opening(self, opening_id: str) -> None:
+        """Push ``opening.deleted`` then terminate all of its streams."""
+        queues = self._subscribers.pop(opening_id, set())
+        for queue in queues:
+            self._offer(
+                queue,
+                OpeningEvent(
+                    "opening.deleted", {"openingId": opening_id}
+                ),
+            )
+            self._offer(queue, _CLOSE)
 
 
 class EventPublisher:
@@ -58,9 +102,12 @@ class EventPublisher:
         self, opening_id: str, candidate_id: str
     ) -> None:
         candidate = await self.repository.get_candidate_result(candidate_id)
-        completed_count, total_count = await self.repository.candidate_counts(
-            opening_id
-        )
+        if candidate is None:
+            # Deleted mid-flight — the delete endpoint publishes
+            # candidate.deleted itself.
+            return
+        counts = await self.repository.candidate_counts(opening_id)
+        completed_count, total_count = counts
         self.hub.publish(
             opening_id,
             OpeningEvent(
@@ -74,12 +121,39 @@ class EventPublisher:
                 },
             ),
         )
+        await self.publish_opening_progress(opening_id, counts)
+
+    def publish_candidate_deleted(
+        self, opening_id: str, candidate_id: str
+    ) -> None:
+        self.hub.publish(
+            opening_id,
+            OpeningEvent(
+                "candidate.deleted", {"candidateId": candidate_id}
+            ),
+        )
+
+    async def publish_candidates_updated(
+        self, opening_id: str, candidate_ids: list[str]
+    ) -> None:
+        """One bulk-change event followed by fresh progress counts."""
+        self.hub.publish(
+            opening_id,
+            OpeningEvent(
+                "candidates.updated",
+                {"candidateIds": list(candidate_ids)},
+            ),
+        )
         await self.publish_opening_progress(opening_id)
 
-    async def publish_opening_progress(self, opening_id: str) -> None:
-        completed_count, total_count = await self.repository.candidate_counts(
-            opening_id
-        )
+    async def publish_opening_progress(
+        self,
+        opening_id: str,
+        counts: tuple[int, int] | None = None,
+    ) -> None:
+        if counts is None:
+            counts = await self.repository.candidate_counts(opening_id)
+        completed_count, total_count = counts
         self.hub.publish(
             opening_id,
             OpeningEvent(

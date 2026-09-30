@@ -29,6 +29,7 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
+import { useOpenings } from "@/lib/openings"
 import { useSession } from "@/hooks/use-session"
 
 interface Crumb {
@@ -43,6 +44,9 @@ interface RouteHandle {
 
 export function AppLayout() {
   const session = useSession()
+  // Crumb labels read the store lazily via getOpening — subscribing here
+  // re-renders them once openings arrive (deep links into /openings/:id).
+  useOpenings()
   const matches = useMatches()
   const [newOpeningOpen, setNewOpeningOpen] = useState(false)
   const [editOpeningOpen, setEditOpeningOpen] = useState(false)
@@ -69,7 +73,7 @@ export function AppLayout() {
       />
       <CvViewerLayout>
         <SidebarInset>
-        <header className="flex h-16 shrink-0 items-center gap-2">
+        <header className="z-10 flex h-16 shrink-0 items-center gap-2 bg-background">
           <div className="flex w-full items-center gap-2 px-4">
             <SidebarTrigger className="-ml-1" />
             <Separator

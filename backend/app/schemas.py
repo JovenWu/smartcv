@@ -43,6 +43,7 @@ class OpeningStatus(StrEnum):
     DRAFT = "draft"
     OPEN = "open"
     CLOSED = "closed"
+    ARCHIVED = "archived"
 
 
 class EmploymentType(StrEnum):

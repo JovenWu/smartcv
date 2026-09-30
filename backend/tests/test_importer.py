@@ -1,9 +1,11 @@
 import json
+import socket
 
 import httpx
 import pymupdf
 import pytest
 
+import backend.app.importer as importer_module
 from backend.app.config import Settings
 from backend.app.importer import (
     OPENING_DRAFT_SCHEMA,
@@ -16,6 +18,24 @@ from backend.app.importer import (
     create_importer,
 )
 from backend.app.typesafe_adapter import FakeEvaluator
+
+
+def _addrinfo(*ips: str):
+    return [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0)) for ip in ips
+    ]
+
+
+@pytest.fixture(autouse=True)
+def _fake_dns(monkeypatch):
+    """Link-import tests use synthetic hosts (e.g. jobstreet.example);
+    resolve them to a public IP so the SSRF DNS check passes. A test can
+    override this by monkeypatching socket.getaddrinfo again."""
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return _addrinfo("93.184.216.34")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
 LISTING_HTML = (
     b"<html><body><h1>Senior Backend Engineer</h1>"
@@ -258,7 +278,7 @@ async def test_covered_experience_is_not_duplicated():
 
 
 async def test_blocked_page_uses_browser_render(monkeypatch):
-    async def fake_browser(self, url):
+    async def fake_browser(self, url, dns_cache=None):
         return "Frontend Engineer at Acme. React, TypeScript. " * 30
 
     monkeypatch.setattr(
@@ -434,6 +454,121 @@ async def test_redirect_to_private_host_is_rejected():
             ImportSource.link("https://public.example/job/1")
         )
     await client.aclose()
+
+
+async def test_hostname_resolving_private_is_rejected(monkeypatch):
+    """A public-looking hostname that resolves to a link-local/metadata
+    address must fail the SSRF check even though the literal is clean."""
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return _addrinfo("169.254.169.254")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    def handler(request):
+        return httpx.Response(200, content=LISTING_HTML)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    importer = LangGraphImporter(
+        make_settings(), FakeEvaluator(), client
+    )
+    with pytest.raises(ListingNotReadable):
+        await importer.import_listing(
+            ImportSource.link("https://metadata.example/latest/meta-data")
+        )
+    await client.aclose()
+
+
+async def test_mixed_resolution_with_private_is_rejected(monkeypatch):
+    """ANY non-public address in the resolver answer is enough."""
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return _addrinfo("93.184.216.34", "10.0.0.7")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    def handler(request):
+        return httpx.Response(200, content=LISTING_HTML)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    importer = LangGraphImporter(
+        make_settings(), FakeEvaluator(), client
+    )
+    with pytest.raises(ListingNotReadable):
+        await importer.import_listing(
+            ImportSource.link("https://roundrobin.example/job/1")
+        )
+    await client.aclose()
+
+
+async def test_unresolvable_hostname_is_rejected(monkeypatch):
+    """DNS failure fails closed."""
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        raise socket.gaierror(-2, "Name or service not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    def handler(request):
+        return httpx.Response(200, content=LISTING_HTML)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    importer = LangGraphImporter(
+        make_settings(), FakeEvaluator(), client
+    )
+    with pytest.raises(ListingNotReadable):
+        await importer.import_listing(
+            ImportSource.link("https://gone.example/job/1")
+        )
+    await client.aclose()
+
+
+class _FakeRequest:
+    def __init__(self, url):
+        self.url = url
+
+
+class _FakeRoute:
+    """Minimal stand-in for a playwright Route."""
+
+    def __init__(self, url):
+        self.request = _FakeRequest(url)
+        self.aborted = False
+        self.continued = False
+
+    async def abort(self):
+        self.aborted = True
+
+    async def continue_(self):
+        self.continued = True
+
+
+async def test_browser_route_aborts_private_redirect_target():
+    """The route guard covers redirect hops: a navigation landing on a
+    private literal is aborted before any bytes flow."""
+    route = _FakeRoute("http://169.254.169.254/latest/meta-data")
+    await importer_module._guard_browser_route(route, {})
+    assert route.aborted is True
+    assert route.continued is False
+
+
+async def test_browser_route_aborts_host_resolving_private(monkeypatch):
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        return _addrinfo("127.0.0.1")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    route = _FakeRoute("https://evil.example/tracker.js")
+    await importer_module._guard_browser_route(route, {})
+    assert route.aborted is True
+    assert route.continued is False
+
+
+async def test_browser_route_continues_public_request():
+    route = _FakeRoute("https://cdn.example/app.js")
+    await importer_module._guard_browser_route(route, {})
+    assert route.continued is True
+    assert route.aborted is False
 
 
 def test_draft_schema_satisfies_strict_mode():

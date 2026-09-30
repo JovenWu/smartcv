@@ -1,18 +1,35 @@
 import { useMemo, useSyncExternalStore } from "react"
 
-import { apiFetch } from "@/lib/api"
-import { refreshOpenings } from "@/lib/openings"
-import type { Candidate, CandidateDecision, CandidateStatus } from "@/types"
+import {
+  apiFetch,
+  candidatesApi,
+  type CriterionReview,
+} from "@/lib/api"
+import { refreshOpenings, refreshOpeningsSoon } from "@/lib/openings"
+import type {
+  BulkDecisionResult,
+  Candidate,
+  CandidateDecision,
+  CandidateStatus,
+} from "@/types"
 
 /**
  * Per-opening candidate cache fed by GET + SSE. Each opening id keeps its
- * own list and one EventSource; both live as long as at least one hook
- * subscriber is mounted.
+ * own list and one EventSource; the stream lives as long as at least one
+ * hook subscriber is mounted. Detach keeps the last list so a remount can
+ * revalidate silently instead of flashing the empty state.
  */
 interface CacheEntry {
   list: Candidate[]
   refs: number
+  /** True once a GET has resolved; reset on detach so remount revalidates. */
   loaded: boolean
+  /** Initial GET failed — surfaced as "error" via useCandidatesStatus. */
+  error: boolean
+  /** opening.deleted arrived — terminal; no refetch or stream reconnect. */
+  deleted: boolean
+  /** GET in flight — dedupes concurrent attaches and SSE refetches. */
+  fetching: boolean
   events?: EventSource
 }
 
@@ -26,14 +43,21 @@ function emit() {
 function entryFor(openingId: string): CacheEntry {
   let entry = caches.get(openingId)
   if (!entry) {
-    entry = { list: [], refs: 0, loaded: false }
+    entry = {
+      list: [],
+      refs: 0,
+      loaded: false,
+      error: false,
+      deleted: false,
+      fetching: false,
+    }
     caches.set(openingId, entry)
   }
   return entry
 }
 
 export type CandidateSort = {
-  /** "name", "score", or a criterion id. */
+  /** "name", "score", "decision", or a criterion id. */
   column: string
   dir: "asc" | "desc"
 }
@@ -44,12 +68,20 @@ export const IN_FLIGHT_STATUSES: ReadonlySet<CandidateStatus> = new Set([
   "evaluating",
 ])
 
+// Decision sort order: shortlisted outranks undecided, rejected sinks.
+const DECISION_RANK: Record<CandidateDecision, number> = {
+  passed: 0,
+  undecided: 1,
+  shortlisted: 2,
+}
+
 function sortValue(
   candidate: Candidate,
   column: string,
 ): number | string | null {
   if (column === "name") return candidate.name.toLowerCase()
   if (column === "score") return candidate.totalScore
+  if (column === "decision") return DECISION_RANK[candidate.decision] ?? null
   const evaluation = candidate.evaluations.find(
     (e) => e.criterionId === column,
   )
@@ -115,6 +147,33 @@ function upsert(openingId: string, candidate: Candidate) {
   emit()
 }
 
+/**
+ * GET the candidate list once. Skipped when a fetch is already in flight
+ * or the opening was deleted; failures surface via useCandidatesStatus.
+ */
+function fetchList(openingId: string) {
+  const entry = entryFor(openingId)
+  if (entry.fetching || entry.deleted) return
+  entry.fetching = true
+  void candidatesApi
+    .list(openingId)
+    .then((list) => {
+      // opening.deleted may have landed while this GET was in flight.
+      if (entry.deleted) return
+      entry.loaded = true
+      entry.error = false
+      setList(openingId, list)
+    })
+    .catch(() => {
+      entry.loaded = false
+      entry.error = true
+      emit()
+    })
+    .finally(() => {
+      entry.fetching = false
+    })
+}
+
 function onEvent(openingId: string, event: string, data: unknown) {
   const payload = data as Record<string, unknown>
   switch (event) {
@@ -122,7 +181,7 @@ function onEvent(openingId: string, event: string, data: unknown) {
     case "opening.complete": {
       const candidates = payload.candidates as Candidate[] | undefined
       if (candidates) setList(openingId, candidates)
-      void refreshOpenings().catch(() => {})
+      refreshOpeningsSoon()
       // Terminal stream — EventSource would otherwise auto-reconnect and
       // the server would replay the snapshot in a poll loop.
       const opening = payload.opening as { isFinal?: boolean } | undefined
@@ -134,11 +193,38 @@ function onEvent(openingId: string, event: string, data: unknown) {
     case "candidate.updated": {
       const candidate = payload.candidate as Candidate | undefined
       if (candidate) upsert(openingId, candidate)
-      void refreshOpenings().catch(() => {})
+      refreshOpeningsSoon()
+      break
+    }
+    case "candidate.deleted": {
+      const candidateId = payload.candidateId as string | undefined
+      if (candidateId) {
+        const entry = entryFor(openingId)
+        entry.list = entry.list.filter((c) => c.id !== candidateId)
+        emit()
+      }
+      refreshOpeningsSoon()
+      break
+    }
+    case "candidates.updated":
+      // Bulk change — refetch this opening's list once instead of
+      // applying one event per row.
+      fetchList(openingId)
+      break
+    case "opening.deleted": {
+      const entry = caches.get(openingId)
+      if (entry) {
+        entry.events?.close()
+        entry.events = undefined
+        entry.list = []
+        entry.deleted = true
+        emit()
+      }
+      refreshOpeningsSoon()
       break
     }
     case "opening.progress":
-      void refreshOpenings().catch(() => {})
+      refreshOpeningsSoon()
       break
   }
 }
@@ -146,6 +232,7 @@ function onEvent(openingId: string, event: string, data: unknown) {
 function ensureStream(openingId: string) {
   const entry = entryFor(openingId)
   if (
+    entry.deleted ||
     typeof EventSource !== "function" ||
     (entry.events && entry.events.readyState !== EventSource.CLOSED)
   ) {
@@ -155,11 +242,18 @@ function ensureStream(openingId: string) {
   for (const name of [
     "snapshot",
     "candidate.updated",
+    "candidate.deleted",
+    "candidates.updated",
     "opening.progress",
     "opening.complete",
+    "opening.deleted",
   ]) {
     events.addEventListener(name, (e: MessageEvent) => {
-      onEvent(openingId, name, JSON.parse(e.data))
+      try {
+        onEvent(openingId, name, JSON.parse(e.data))
+      } catch {
+        // Malformed payload — drop the event, keep the stream.
+      }
     })
   }
   events.onerror = () => {
@@ -170,14 +264,11 @@ function ensureStream(openingId: string) {
 
 function attach(openingId: string) {
   const entry = entryFor(openingId)
+  if (entry.deleted) return
   ensureStream(openingId)
-  if (entry.loaded) return
-  entry.loaded = true
-  void apiFetch<Candidate[]>(`/api/openings/${openingId}/candidates`)
-    .then((list) => setList(openingId, list))
-    .catch(() => {
-      entry.loaded = false
-    })
+  // Detach keeps the cached list but marks it stale; reattach revalidates
+  // silently and swaps the fresh list in when it lands.
+  if (!entry.loaded) fetchList(openingId)
 }
 
 function detach(openingId: string) {
@@ -185,8 +276,10 @@ function detach(openingId: string) {
   if (!entry) return
   entry.refs -= 1
   if (entry.refs <= 0) {
+    entry.refs = 0
     entry.events?.close()
-    caches.delete(openingId)
+    entry.events = undefined
+    entry.loaded = false
   }
 }
 
@@ -214,6 +307,26 @@ export function useCandidates(openingId: string | undefined): Candidate[] {
   return useSyncExternalStore(subscribeFor, () =>
     openingId ? (caches.get(openingId)?.list ?? EMPTY) : EMPTY,
   )
+}
+
+export type CandidatesStatus = "loading" | "ready" | "error"
+
+/**
+ * Load state of the per-opening candidate list: "loading" until the first
+ * GET resolves, "error" when it failed or the opening was deleted
+ * (subscribers can react — e.g. navigate away — via this or the openings
+ * store, which drops the opening on the next refresh).
+ */
+export function useCandidatesStatus(
+  openingId: string | undefined,
+): CandidatesStatus {
+  const subscribeFor = useMemo(() => subscribe(openingId), [openingId])
+  return useSyncExternalStore(subscribeFor, () => {
+    const entry = openingId ? caches.get(openingId) : undefined
+    if (!entry) return "loading"
+    if (entry.error || entry.deleted) return "error"
+    return entry.loaded ? "ready" : "loading"
+  })
 }
 
 export interface BatchUploadResponse {
@@ -256,16 +369,13 @@ export async function reviewCriterion(
   openingId: string,
   candidateId: string,
   criterionId: string,
-  review: { matchLevel: "strong" | "partial" | "not_found"; reviewNote?: string },
+  review: CriterionReview,
 ): Promise<Candidate> {
-  const updated = await apiFetch<Candidate>(
-    `/api/openings/${openingId}/candidates/${candidateId}`
-      + `/criteria/${criterionId}`,
-    {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(review),
-    },
+  const updated = await candidatesApi.reviewCriterion(
+    openingId,
+    candidateId,
+    criterionId,
+    review,
   )
   upsert(openingId, updated)
   return updated
@@ -276,26 +386,53 @@ export async function setDecision(
   candidateId: string,
   decision: CandidateDecision,
 ): Promise<Candidate> {
-  const updated = await apiFetch<Candidate>(
-    `/api/openings/${openingId}/candidates/${candidateId}/decision`,
-    {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ decision }),
-    },
+  const updated = await candidatesApi.setDecision(
+    openingId,
+    candidateId,
+    decision,
   )
   upsert(openingId, updated)
   return updated
+}
+
+/**
+ * Apply one decision to many candidates. The backend publishes a single
+ * candidates.updated event, but refetch here too so callers that detached
+ * the stream still converge.
+ */
+export async function bulkSetDecision(
+  openingId: string,
+  candidateIds: string[],
+  decision: CandidateDecision,
+): Promise<BulkDecisionResult> {
+  const result = await candidatesApi.bulkSetDecision(
+    openingId,
+    candidateIds,
+    decision,
+  )
+  fetchList(openingId)
+  return result
+}
+
+export async function removeCandidate(
+  openingId: string,
+  candidateId: string,
+): Promise<void> {
+  await candidatesApi.remove(openingId, candidateId)
+  // Drop the row now — the SSE candidate.deleted event is idempotent.
+  const entry = caches.get(openingId)
+  if (entry) {
+    entry.list = entry.list.filter((c) => c.id !== candidateId)
+    emit()
+  }
+  refreshOpeningsSoon()
 }
 
 export async function retryCandidate(
   openingId: string,
   candidateId: string,
 ): Promise<Candidate> {
-  const updated = await apiFetch<Candidate>(
-    `/api/openings/${openingId}/candidates/${candidateId}/retry`,
-    { method: "POST" },
-  )
+  const updated = await candidatesApi.retry(openingId, candidateId)
   upsert(openingId, updated)
   ensureStream(openingId)
   return updated

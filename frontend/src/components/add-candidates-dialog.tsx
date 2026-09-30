@@ -45,7 +45,7 @@ export function AddCandidatesDialog({
         <FileDropzone
           multiple
           accept=".pdf,.docx"
-          className={busy ? "pointer-events-none" : undefined}
+          busy={busy}
           title={busy ? "Uploading…" : "Drop CVs here"}
           hint="PDF or DOCX · multiple files · or click to browse"
           onFiles={(files) => {

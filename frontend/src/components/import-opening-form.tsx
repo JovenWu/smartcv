@@ -54,6 +54,7 @@ export function ImportOpeningForm({
   const [link, setLink] = useState("")
   const [processing, setProcessing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
 
   const run = async (call: Promise<ImportDraft>) => {
     setProcessing(true)
@@ -77,6 +78,11 @@ export function ImportOpeningForm({
   const importFiles = (files: File[]) => {
     const file = files[0]
     if (!file) return
+    setNote(
+      files.length > 1
+        ? "One listing per import — using the first file."
+        : null,
+    )
     void run(openingsApi.importFile(file))
   }
 
@@ -130,6 +136,7 @@ export function ImportOpeningForm({
         hint="or click to browse files"
         onFiles={importFiles}
       />
+      {note && <p className="mt-2 text-xs text-muted-foreground">{note}</p>}
       {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
     </div>
   )

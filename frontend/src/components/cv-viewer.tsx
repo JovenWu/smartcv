@@ -31,6 +31,8 @@ function CvPreview({ candidate }: { candidate: Candidate }) {
         src={file.url}
         title={`CV of ${candidate.name}`}
         className="h-full w-full"
+        loading="lazy"
+        referrerPolicy="no-referrer"
       />
     ) : (
       <img
@@ -129,44 +131,50 @@ export function CvViewerProvider({ children }: { children: ReactNode }) {
   )
 }
 
-/** Renders the app content beside a resizable CV panel (overlay on mobile). */
+/**
+ * Renders the app content beside a resizable CV panel (overlay on mobile).
+ * The panel group and the main panel stay mounted whether or not a CV is
+ * selected — only the handle/second panel (or the mobile overlay) toggle.
+ * Switching the wrapper element by state would remount the whole page tree.
+ */
 export function CvViewerLayout({ children }: { children: ReactNode }) {
   const { selected, closeCv } = useCvViewer()
   const { isMobile, state: sidebarState } = useSidebar()
 
-  if (!selected) return <>{children}</>
-
-  if (isMobile) {
-    return (
-      <>
-        {children}
+  return (
+    <>
+      <ResizablePanelGroup
+        orientation="horizontal"
+        className="min-w-0 flex-1"
+      >
+        {/* Padding lives on the panel, not the frame: the library wraps
+            panel children in an internal scroll region where a margin
+            inflates scrollHeight and yields a phantom page scrollbar. */}
+        <ResizablePanel
+          minSize="30%"
+          className={cn(
+            "md:p-2",
+            sidebarState === "collapsed" ? "" : "md:pl-0",
+          )}
+        >
+          <div className="flex h-full min-h-0 min-w-0 flex-col bg-background md:overflow-hidden md:rounded-xl md:shadow-sm">
+            {children}
+          </div>
+        </ResizablePanel>
+        {selected && !isMobile && (
+          <>
+            <ResizableHandle withHandle />
+            <ResizablePanel defaultSize="28%" minSize="20%" maxSize="60%">
+              <CvViewerPanel candidate={selected} onClose={closeCv} />
+            </ResizablePanel>
+          </>
+        )}
+      </ResizablePanelGroup>
+      {selected && isMobile && (
         <div className="fixed inset-0 z-40">
           <CvViewerPanel candidate={selected} onClose={closeCv} />
         </div>
-      </>
-    )
-  }
-
-  return (
-    <ResizablePanelGroup
-      orientation="horizontal"
-      className="min-w-0 flex-1"
-    >
-      <ResizablePanel minSize="30%">
-        {/* peer-* inset styling doesn't reach inside a panel — replicate the frame */}
-        <div
-          className={cn(
-            "flex h-full min-w-0 flex-col bg-background md:m-2 md:overflow-hidden md:rounded-xl md:shadow-sm",
-            sidebarState === "collapsed" ? "md:ml-2" : "md:ml-0",
-          )}
-        >
-          {children}
-        </div>
-      </ResizablePanel>
-      <ResizableHandle withHandle />
-      <ResizablePanel defaultSize="28%" minSize="20%" maxSize="60%">
-        <CvViewerPanel candidate={selected} onClose={closeCv} />
-      </ResizablePanel>
-    </ResizablePanelGroup>
+      )}
+    </>
   )
 }
