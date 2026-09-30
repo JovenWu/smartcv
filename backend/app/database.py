@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
@@ -85,7 +86,8 @@ CREATE TABLE IF NOT EXISTS candidates (
     status TEXT NOT NULL,
     total_score REAL,
     error_message TEXT,
-    retryable INTEGER NOT NULL DEFAULT 0
+    retryable INTEGER NOT NULL DEFAULT 0,
+    file_hash TEXT
 );
 CREATE TABLE IF NOT EXISTS evidence_spans (
     candidate_id TEXT NOT NULL REFERENCES candidates(id),
@@ -142,6 +144,7 @@ _CANDIDATE_COLUMNS = [
     ("page_count", "INTEGER"),
     ("decision", "TEXT NOT NULL DEFAULT 'undecided'"),
     ("uploaded_at", "TEXT"),
+    ("file_hash", "TEXT"),
 ]
 _EVALUATION_COLUMNS = [
     ("rationale", "TEXT"),
@@ -202,6 +205,7 @@ class SQLiteRepository:
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA)
         await self._migrate()
+        await self._backfill_file_hashes()
         await self._db.commit()
 
     async def close(self) -> None:
@@ -280,6 +284,27 @@ class SQLiteRepository:
         except Exception:
             await self.db.rollback()
             raise
+
+    async def _backfill_file_hashes(self) -> None:
+        """Hash stored files for candidates that predate file_hash."""
+        if "file_hash" not in await self._columns("candidates"):
+            return
+        cursor = await self.db.execute(
+            "SELECT id, stored_path FROM candidates WHERE file_hash IS NULL"
+        )
+        updates = []
+        for row in await cursor.fetchall():
+            try:
+                digest = hashlib.sha256(
+                    Path(row["stored_path"]).read_bytes()
+                ).hexdigest()
+            except OSError:
+                continue
+            updates.append((digest, row["id"]))
+        if updates:
+            await self.db.executemany(
+                "UPDATE candidates SET file_hash = ? WHERE id = ?", updates
+            )
 
     # ---------- openings ----------
 
@@ -485,8 +510,8 @@ class SQLiteRepository:
             await self.db.executemany(
                 "INSERT INTO candidates ("
                 "id, opening_id, filename, stored_path, upload_order, "
-                "status, mime_type, uploaded_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "status, mime_type, uploaded_at, file_hash"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         item["id"],
@@ -497,6 +522,7 @@ class SQLiteRepository:
                         CandidateStatus.QUEUED,
                         item.get("mime_type"),
                         _utcnow(),
+                        item.get("file_hash"),
                     )
                     for item in items
                 ],
@@ -507,6 +533,18 @@ class SQLiteRepository:
                 "UPDATE openings SET is_final = 0 WHERE id = ?", (opening_id,)
             )
             await self.db.commit()
+
+    async def find_candidate_by_file_hash(
+        self, opening_id: str, file_hash: str
+    ) -> str | None:
+        cursor = await self.db.execute(
+            "SELECT id FROM candidates "
+            "WHERE opening_id = ? AND file_hash = ? "
+            "ORDER BY upload_order LIMIT 1",
+            (opening_id, file_hash),
+        )
+        row = await cursor.fetchone()
+        return row["id"] if row else None
 
     async def get_candidate(
         self, candidate_id: str

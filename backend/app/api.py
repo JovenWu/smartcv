@@ -1,3 +1,4 @@
+import hashlib
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -48,8 +49,10 @@ def _encode_sse(name: str, payload: dict) -> str:
 
 async def _store_upload(
     file: UploadFile, destination: Path, max_bytes: int
-) -> int:
+) -> str:
+    """Stream the upload to disk; return its SHA-256 hex digest."""
     written = 0
+    hasher = hashlib.sha256()
     try:
         with open(destination, "wb") as out:
             while chunk := await file.read(_CHUNK_SIZE):
@@ -58,11 +61,12 @@ async def _store_upload(
                     raise UnsupportedFile(
                         f"File exceeds the {max_bytes} byte limit"
                     )
+                hasher.update(chunk)
                 out.write(chunk)
     except Exception:
         destination.unlink(missing_ok=True)
         raise
-    return written
+    return hasher.hexdigest()
 
 
 @router.post("/weight-suggestions", response_model=WeightSuggestionResponse)
@@ -233,23 +237,45 @@ async def upload_candidates(
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     queued: list[str] = []
     batch_ids: list[str] = []
+    duplicate_ids: list[str] = []
+    seen_hashes: dict[str, str] = {}
     for upload_order, file in enumerate(files):
         candidate_id = uuid.uuid4().hex
         filename = file.filename or f"cv-{upload_order}"
         suffix = Path(filename).suffix.lower()
         stored_path = settings.uploads_dir / f"{candidate_id}{suffix}"
         error: str | None = None
+        file_hash: str | None = None
         try:
             if suffix not in {".pdf", ".docx"}:
                 raise UnsupportedFile(
                     f"Unsupported file type '{suffix or '(none)'}'; "
                     "upload PDF or DOCX"
                 )
-            await _store_upload(file, stored_path, settings.max_file_bytes)
-            validate_upload(stored_path, filename, settings.max_file_bytes)
+            file_hash = await _store_upload(
+                file, stored_path, settings.max_file_bytes
+            )
         except UnsupportedFile as exc:
             error = str(exc)
             stored_path.unlink(missing_ok=True)
+        if error is None and file_hash is not None:
+            duplicate_id = seen_hashes.get(
+                file_hash
+            ) or await repository.find_candidate_by_file_hash(
+                opening_id, file_hash
+            )
+            if duplicate_id is not None:
+                stored_path.unlink(missing_ok=True)
+                duplicate_ids.append(duplicate_id)
+                continue
+            seen_hashes[file_hash] = candidate_id
+            try:
+                validate_upload(
+                    stored_path, filename, settings.max_file_bytes
+                )
+            except UnsupportedFile as exc:
+                error = str(exc)
+                stored_path.unlink(missing_ok=True)
         await repository.add_candidates(
             opening_id,
             [
@@ -259,6 +285,7 @@ async def upload_candidates(
                     "stored_path": str(stored_path),
                     "upload_order": upload_order,
                     "mime_type": file.content_type,
+                    "file_hash": file_hash,
                 }
             ],
         )
@@ -281,7 +308,16 @@ async def upload_candidates(
         result = await repository.get_candidate_result(candidate_id)
         assert result is not None
         results.append(result)
-    return BatchUploadResponse(candidates=results, total_count=len(results))
+    duplicates = []
+    for candidate_id in duplicate_ids:
+        result = await repository.get_candidate_result(candidate_id)
+        if result is not None:
+            duplicates.append(result)
+    return BatchUploadResponse(
+        candidates=results,
+        duplicates=duplicates,
+        total_count=len(results) + len(duplicates),
+    )
 
 
 @router.get(

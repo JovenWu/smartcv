@@ -212,6 +212,7 @@ class WeightSuggestionResponse(ApiModel):
 
 class BatchUploadResponse(ApiModel):
     candidates: list[Candidate]
+    duplicates: list[Candidate] = Field(default_factory=list)
     total_count: int = Field(ge=0)
 
 

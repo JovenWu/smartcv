@@ -143,6 +143,63 @@ def test_batch_over_limit_is_413_without_writes(client, settings):
     assert opening["candidates"] == 0
 
 
+def test_duplicate_upload_is_skipped(client):
+    opening_id = make_opening(client)
+    payload = pdf_bytes("Built Python services")
+    first = client.post(
+        f"/api/openings/{opening_id}/candidates",
+        files=[("files", ("jane.pdf", payload, "application/pdf"))],
+    )
+    assert first.status_code == 201
+    assert len(first.json()["candidates"]) == 1
+
+    # Same bytes under a different filename is still a duplicate.
+    second = client.post(
+        f"/api/openings/{opening_id}/candidates",
+        files=[("files", ("jane-copy.pdf", payload, "application/pdf"))],
+    )
+    assert second.status_code == 201
+    body = second.json()
+    assert body["candidates"] == []
+    assert len(body["duplicates"]) == 1
+    assert body["duplicates"][0]["file"]["filename"] == "jane.pdf"
+
+    candidates = client.get(f"/api/openings/{opening_id}/candidates").json()
+    assert len(candidates) == 1
+
+
+def test_duplicate_within_one_batch_is_skipped(client):
+    opening_id = make_opening(client)
+    payload = pdf_bytes("Python PostgreSQL")
+    files = [
+        ("files", ("a.pdf", payload, "application/pdf")),
+        ("files", ("a-copy.pdf", payload, "application/pdf")),
+        ("files", ("b.pdf", pdf_bytes("Different CV"), "application/pdf")),
+    ]
+    response = client.post(
+        f"/api/openings/{opening_id}/candidates", files=files
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert len(body["candidates"]) == 2
+    assert len(body["duplicates"]) == 1
+    assert body["duplicates"][0]["file"]["filename"] == "a.pdf"
+
+
+def test_same_file_to_another_opening_is_allowed(client):
+    opening_a = make_opening(client)
+    opening_b = make_opening(client)
+    payload = pdf_bytes("Python")
+    for opening_id in (opening_a, opening_b):
+        response = client.post(
+            f"/api/openings/{opening_id}/candidates",
+            files=[("files", ("cv.pdf", payload, "application/pdf"))],
+        )
+        assert response.status_code == 201
+        assert len(response.json()["candidates"]) == 1
+        assert response.json()["duplicates"] == []
+
+
 def test_batch_at_limit_is_accepted(client, settings):
     opening_id = make_opening(client)
     settings.max_batch_files = 4
@@ -257,7 +314,7 @@ def test_retryable_failure_can_be_retried(settings, tmp_path):
     fake = FakeEvaluator()
 
     class FlakyEvaluator:
-        async def evaluate_candidate(self, criteria, spans):
+        async def evaluate_candidate(self, criteria, spans, opening=None):
             attempts["count"] += 1
             if attempts["count"] == 1:
                 raise RetryableEvaluationError("temporary outage")
