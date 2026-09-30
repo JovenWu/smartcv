@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest"
 
 import { CvViewerLayout, CvViewerProvider } from "@/components/cv-viewer"
 import { useCvViewer } from "@/components/cv-viewer-context"
-import { SidebarProvider } from "@/components/ui/sidebar"
+import { SidebarProvider, useSidebar } from "@/components/ui/sidebar"
 import type { Candidate } from "@/types"
 
 const CANDIDATE: Candidate = {
@@ -31,10 +31,21 @@ function Trigger() {
   return <button onClick={() => openCv(CANDIDATE)}>Open CV</button>
 }
 
+function SidebarProbe() {
+  const { open, toggleSidebar } = useSidebar()
+  return (
+    <>
+      <span data-testid="sidebar-state">{open ? "expanded" : "collapsed"}</span>
+      <button onClick={toggleSidebar}>Toggle sidebar</button>
+    </>
+  )
+}
+
 function renderViewer() {
   return render(
     <SidebarProvider>
       <CvViewerProvider>
+        <SidebarProbe />
         <CvViewerLayout>
           <div data-testid="page">
             <Trigger />
@@ -60,5 +71,24 @@ describe("CvViewerLayout", () => {
     await user.click(screen.getByRole("button", { name: "Close CV" }))
     expect(screen.queryByText("Ada Lovelace")).not.toBeInTheDocument()
     expect(screen.getByTestId("page")).toBe(page)
+  })
+
+  it("collapses the sidebar for the viewer and restores it on close", async () => {
+    const user = userEvent.setup()
+    renderViewer()
+    const state = () => screen.getByTestId("sidebar-state")
+    expect(state()).toHaveTextContent("expanded")
+
+    await user.click(screen.getByRole("button", { name: "Open CV" }))
+    expect(state()).toHaveTextContent("collapsed")
+
+    // The collapse is not a lock — the user can still toggle the sidebar.
+    await user.click(screen.getByRole("button", { name: "Toggle sidebar" }))
+    expect(state()).toHaveTextContent("expanded")
+    await user.click(screen.getByRole("button", { name: "Toggle sidebar" }))
+    expect(state()).toHaveTextContent("collapsed")
+
+    await user.click(screen.getByRole("button", { name: "Close CV" }))
+    expect(state()).toHaveTextContent("expanded")
   })
 })

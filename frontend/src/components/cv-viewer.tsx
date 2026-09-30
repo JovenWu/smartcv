@@ -95,13 +95,16 @@ function CvViewerPanel({
 export function CvViewerProvider({ children }: { children: ReactNode }) {
   const [selected, setSelected] = useState<Candidate | null>(null)
   const { open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar()
-  const prevSidebarOpen = useRef(true)
-  const collapsedByViewer = useRef(false)
+  // Pending restore of the user's sidebar state, run when the viewer
+  // closes. Kept in a ref rather than an effect dep: setOpen's identity
+  // changes on every sidebar toggle, so a cleanup keyed on it would fire
+  // mid-session and snap the sidebar back to its pre-viewer state.
+  const restoreSidebar = useRef<(() => void) | null>(null)
 
   const openCv = (candidate: Candidate) => {
-    if (!collapsedByViewer.current) {
-      prevSidebarOpen.current = sidebarOpen
-      collapsedByViewer.current = true
+    if (!restoreSidebar.current) {
+      const prevOpen = sidebarOpen
+      restoreSidebar.current = () => setSidebarOpen(prevOpen)
       setSidebarOpen(false)
     }
     setSelected(candidate)
@@ -109,18 +112,11 @@ export function CvViewerProvider({ children }: { children: ReactNode }) {
 
   const closeCv = () => {
     setSelected(null)
-    if (collapsedByViewer.current) {
-      collapsedByViewer.current = false
-      setSidebarOpen(prevSidebarOpen.current)
-    }
+    restoreSidebar.current?.()
+    restoreSidebar.current = null
   }
 
-  useEffect(
-    () => () => {
-      if (collapsedByViewer.current) setSidebarOpen(prevSidebarOpen.current)
-    },
-    [setSidebarOpen],
-  )
+  useEffect(() => () => restoreSidebar.current?.(), [])
 
   const value: CvViewer = { selected, openCv, closeCv }
 
@@ -164,7 +160,7 @@ export function CvViewerLayout({ children }: { children: ReactNode }) {
         {selected && !isMobile && (
           <>
             <ResizableHandle withHandle />
-            <ResizablePanel defaultSize="28%" minSize="20%" maxSize="60%">
+            <ResizablePanel defaultSize="37%" minSize="20%" maxSize="60%">
               <CvViewerPanel candidate={selected} onClose={closeCv} />
             </ResizablePanel>
           </>
