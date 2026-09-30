@@ -270,6 +270,25 @@ async def test_suggest_criteria_with_no_skills_returns_empty():
     assert client.calls == []
 
 
+async def test_evaluate_candidate_sends_opening_context(evaluator):
+    from datetime import datetime, timezone
+
+    from backend.app.schemas import Opening
+
+    opening = Opening(
+        id="o1",
+        title="Backend Engineer",
+        department="Platform",
+        description="Build backend APIs.",
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    await evaluator.evaluate_candidate(CRITERIA, SPANS, opening)
+    state = evaluator.client.calls[0]["state"]
+    assert state["opening"]["title"] == "Backend Engineer"
+    assert state["opening"]["department"] == "Platform"
+    assert state["opening"]["description"] == "Build backend APIs."
+
+
 async def test_service_error_becomes_retryable():
     evaluator = TypeSafeEvaluator(
         client=FakeClient(error=RuntimeError("boom")), review_threshold=0.5

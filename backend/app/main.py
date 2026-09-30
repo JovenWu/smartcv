@@ -10,6 +10,7 @@ from backend.app.config import Settings, get_settings
 from backend.app.database import SQLiteRepository
 from backend.app.events import EventHub, EventPublisher
 from backend.app.importer import create_importer
+from backend.app.reviewer import create_reviewer
 from backend.app.typesafe_adapter import create_evaluator
 from backend.app.worker import CandidateWorkerPool
 
@@ -23,12 +24,14 @@ def create_app(
     settings: Settings | None = None,
     evaluator=None,
     importer=None,
+    reviewer=None,
 ) -> FastAPI:
     settings = settings or get_settings()
     app = FastAPI(title="SmartCV")
     app.state.settings = settings
     app.state.evaluator_override = evaluator
     app.state.importer_override = importer
+    app.state.reviewer_override = reviewer
     app.state.sessions = SessionStore()
 
     @asynccontextmanager
@@ -52,6 +55,13 @@ def create_app(
             active_importer, import_client = create_importer(
                 settings, active_evaluator
             )
+        if app.state.reviewer_override is not None:
+            active_reviewer, review_client = (
+                app.state.reviewer_override,
+                None,
+            )
+        else:
+            active_reviewer, review_client = create_reviewer(settings)
         app.state.importer = active_importer
         hub = EventHub()
         publisher = EventPublisher(hub, repository)
@@ -60,9 +70,11 @@ def create_app(
             evaluator=active_evaluator,
             event_publisher=publisher,
             worker_count=settings.worker_count,
+            reviewer=active_reviewer,
         )
         app.state.repository = repository
         app.state.evaluator = active_evaluator
+        app.state.reviewer = active_reviewer
         app.state.event_hub = hub
         app.state.event_publisher = publisher
         app.state.worker_pool = pool
@@ -75,6 +87,8 @@ def create_app(
                 await client.aclose()
             if import_client is not None:
                 await import_client.aclose()
+            if review_client is not None:
+                await review_client.aclose()
             await repository.close()
 
     app.router.lifespan_context = lifespan

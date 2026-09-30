@@ -11,6 +11,7 @@ from backend.app.schemas import (
     CriterionInput,
     EvidenceSpan,
     MatchStatus,
+    Opening,
     SkillSuggestion,
     SuggestedCriterion,
     WeightSuggestion,
@@ -202,7 +203,10 @@ class TypeSafeEvaluator:
         return suggestions
 
     async def evaluate_candidate(
-        self, criteria: list[Criterion], spans: list[EvidenceSpan]
+        self,
+        criteria: list[Criterion],
+        spans: list[EvidenceSpan],
+        opening: Opening | None = None,
     ) -> list[CriterionEvaluation]:
         evaluation_spans = prepare_evaluation_spans(spans)
         questions = {}
@@ -230,21 +234,31 @@ class TypeSafeEvaluator:
                     NO_MATCH: "No listed span supports the requirement.",
                 },
             )
+        state = {
+            "criteria": [
+                {
+                    "id": criterion.id,
+                    "name": criterion.name,
+                    "description": criterion.description,
+                }
+                for criterion in criteria
+            ],
+            "spans": [
+                span.model_dump(mode="json") for span in evaluation_spans
+            ],
+        }
+        if opening is not None:
+            state["opening"] = {
+                "title": opening.title,
+                "department": opening.department,
+                "location": opening.location,
+                "description": opening.description,
+                "experience_level": opening.experience_level,
+                "education_level": opening.education_level,
+            }
         try:
             result = await self.client.system_one(
-                state={
-                    "criteria": [
-                        {
-                            "id": criterion.id,
-                            "name": criterion.name,
-                            "description": criterion.description,
-                        }
-                        for criterion in criteria
-                    ],
-                    "spans": [
-                        span.model_dump(mode="json") for span in evaluation_spans
-                    ],
-                },
+                state=state,
                 questions=questions,
             )
         except Exception as error:
@@ -356,7 +370,10 @@ class FakeEvaluator:
         return suggestions
 
     async def evaluate_candidate(
-        self, criteria: list[Criterion], spans: list[EvidenceSpan]
+        self,
+        criteria: list[Criterion],
+        spans: list[EvidenceSpan],
+        opening: Opening | None = None,
     ) -> list[CriterionEvaluation]:
         evaluations = []
         for criterion in criteria:

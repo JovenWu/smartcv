@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from backend.app.documents import (
     NeedsManualReview,
@@ -10,6 +11,8 @@ from backend.app.documents import (
 )
 from backend.app.schemas import CandidateStatus, MatchStatus
 from backend.app.typesafe_adapter import RetryableEvaluationError
+
+log = logging.getLogger(__name__)
 
 _STOP_TIMEOUT_SECONDS = 10
 
@@ -43,11 +46,13 @@ class CandidateWorkerPool:
         evaluator,
         event_publisher,
         worker_count: int = 4,
+        reviewer=None,
     ) -> None:
         self.repository = repository
         self.evaluator = evaluator
         self.event_publisher = event_publisher
         self.worker_count = worker_count
+        self.reviewer = reviewer
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._pending: set[str] = set()
         self._tasks: list[asyncio.Task] = []
@@ -154,9 +159,10 @@ class CandidateWorkerPool:
         await self.event_publisher.publish_candidate_update(
             candidate.opening_id, candidate_id
         )
+        opening = await self.repository.get_opening(candidate.opening_id)
         try:
             evaluations = await self.evaluator.evaluate_candidate(
-                candidate.criteria, parsed.spans
+                candidate.criteria, parsed.spans, opening
             )
         except RetryableEvaluationError as error:
             await self.repository.mark_candidate_failed(
@@ -166,6 +172,9 @@ class CandidateWorkerPool:
                 candidate.opening_id, candidate_id
             )
             return
+        evaluations = await self._escalate_flagged(
+            opening, candidate.criteria, evaluations, parsed.spans
+        )
         status, total = candidate_outcome(evaluations, candidate.criteria)
         await self.repository.save_candidate_result(
             candidate_id, list(evaluations), status, total
@@ -173,3 +182,34 @@ class CandidateWorkerPool:
         await self.event_publisher.publish_candidate_update(
             candidate.opening_id, candidate_id
         )
+
+    async def _escalate_flagged(
+        self, opening, criteria, evaluations, spans
+    ):
+        """Second pass: let the reasoning model settle flagged cells.
+
+        Returns the evaluations with any resolved cells replaced; on any
+        reviewer failure the flagged cells pass through unchanged.
+        """
+        if self.reviewer is None:
+            return evaluations
+        flagged = [
+            e for e in evaluations if e.status == MatchStatus.NEEDS_REVIEW
+        ]
+        if not flagged:
+            return evaluations
+        try:
+            reviewed = await self.reviewer.review(
+                opening=opening,
+                criteria=criteria,
+                flagged=flagged,
+                spans=spans,
+            )
+        except Exception:
+            log.warning(
+                "Second-pass review raised unexpectedly", exc_info=True
+            )
+            return evaluations
+        return [
+            reviewed.get(e.criterion_id, e) for e in evaluations
+        ]

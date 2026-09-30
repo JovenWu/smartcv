@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     max_file_bytes: int = 10_000_000
     worker_count: int = Field(default=4, ge=1)
     review_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Second-pass review: needs_review cells are escalated to the
+    # OpenRouter reasoning model before surfacing to a human. Requires
+    # OPENROUTER_API_KEY; cells the model cannot decide stay flagged.
+    escalation_enabled: bool = True
+    escalation_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    escalation_timeout: float = 120.0
     data_dir: Path = DEFAULT_DATA_DIR
     # When unset, derived from data_dir so a custom data_dir stays isolated.
     database_path: Path | None = None

@@ -61,7 +61,14 @@ async def add_candidate(
     return candidate_id
 
 
-def make_pool(repository, tmp_path, evaluator=None, worker_count=4, events=None):
+def make_pool(
+    repository,
+    tmp_path,
+    evaluator=None,
+    worker_count=4,
+    events=None,
+    reviewer=None,
+):
     hub = events or EventHub()
     publisher = EventPublisher(hub, repository)
     pool = CandidateWorkerPool(
@@ -69,8 +76,24 @@ def make_pool(repository, tmp_path, evaluator=None, worker_count=4, events=None)
         evaluator=evaluator or FakeEvaluator(),
         event_publisher=publisher,
         worker_count=worker_count,
+        reviewer=reviewer,
     )
     return pool
+
+
+class FlaggingEvaluator:
+    """Marks every criterion needs_review so the reviewer can step in."""
+
+    async def evaluate_candidate(self, criteria, spans, opening=None):
+        return [
+            CriterionEvaluation(
+                criterion_id=criterion.id,
+                status=MatchStatus.NEEDS_REVIEW,
+                confidence=0.2,
+                model_fraction=0.5,
+            )
+            for criterion in criteria
+        ]
 
 
 async def test_opening_and_confirmed_weights_persist(repository, opening):
@@ -205,7 +228,7 @@ async def test_evaluator_error_fails_retryable(repository, opening, tmp_path):
     )
 
     class FailingEvaluator:
-        async def evaluate_candidate(self, criteria, spans):
+        async def evaluate_candidate(self, criteria, spans, opening=None):
             raise RetryableEvaluationError("service down")
 
     pool = make_pool(repository, tmp_path, evaluator=FailingEvaluator())
@@ -382,6 +405,72 @@ async def test_terminal_marker_is_atomic(repository, opening, tmp_path):
     )
     assert await repository.mark_opening_complete_if_terminal(opening) is True
     assert await repository.mark_opening_complete_if_terminal(opening) is False
+
+
+async def test_flagged_cells_escalate_to_reviewer(
+    repository, opening, tmp_path
+):
+    candidate_id = await add_candidate(
+        repository,
+        opening,
+        tmp_path,
+        text="Python PostgreSQL production",
+    )
+
+    class ResolvingReviewer:
+        async def review(self, *, opening, criteria, flagged, spans):
+            return {
+                evaluation.criterion_id: CriterionEvaluation(
+                    criterion_id=evaluation.criterion_id,
+                    status=MatchStatus.STRONG,
+                    confidence=0.95,
+                    model_fraction=1.0,
+                    rationale="Confirmed by second pass.",
+                )
+                for evaluation in flagged
+            }
+
+    pool = make_pool(
+        repository,
+        tmp_path,
+        evaluator=FlaggingEvaluator(),
+        reviewer=ResolvingReviewer(),
+    )
+    await pool.process_candidate(candidate_id)
+    result = await repository.get_candidate_result(candidate_id)
+    assert result.status == CandidateStatus.COMPLETE
+    assert all(
+        e.status == MatchStatus.STRONG for e in result.evaluations
+    )
+    assert result.evaluations[0].rationale == "Confirmed by second pass."
+
+
+async def test_reviewer_failure_keeps_review_status(
+    repository, opening, tmp_path
+):
+    candidate_id = await add_candidate(
+        repository,
+        opening,
+        tmp_path,
+        text="Python PostgreSQL production",
+    )
+
+    class FailingReviewer:
+        async def review(self, **kwargs):
+            raise RuntimeError("openrouter down")
+
+    pool = make_pool(
+        repository,
+        tmp_path,
+        evaluator=FlaggingEvaluator(),
+        reviewer=FailingReviewer(),
+    )
+    await pool.process_candidate(candidate_id)
+    result = await repository.get_candidate_result(candidate_id)
+    assert result.status == CandidateStatus.NEEDS_REVIEW
+    assert all(
+        e.status == MatchStatus.NEEDS_REVIEW for e in result.evaluations
+    )
 
 
 def test_candidate_outcome_flags_uncertain_evaluations():
