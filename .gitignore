@@ -21,3 +21,5 @@ frontend/dist/
 .worktrees/
 .DS_Store
 %TEMP%*.json
+smartcv-film/
+docs/smartcv-30s-film-prompt.md
