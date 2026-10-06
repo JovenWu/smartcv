@@ -91,7 +91,7 @@ function OpeningCard({
               <div className="flex items-center gap-1">
                 {opening.pendingReview > 0 && (
                   <span
-                    className="flex size-7 items-center justify-center rounded-full bg-foreground text-xs font-semibold text-background tabular-nums"
+                    className="flex size-7 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground tabular-nums"
                     aria-label={`${opening.pendingReview} pending review`}
                   >
                     {opening.pendingReview}

@@ -10,6 +10,7 @@ import type {
   EvidenceSpan,
   Opening,
 } from "@/types"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -154,10 +155,13 @@ export function EvidenceDialog({
                         {group.criterion?.name ?? "Other excerpts"}
                       </h3>
                       {meta && (
-                        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                          <meta.icon className="size-3" />
+                        <Badge
+                          variant={meta.badgeVariant}
+                          className={meta.badgeClass}
+                        >
+                          <meta.icon data-icon="inline-start" />
                           {meta.label}
-                        </span>
+                        </Badge>
                       )}
                     </div>
                     <ul className="mt-1.5 flex flex-col gap-2">

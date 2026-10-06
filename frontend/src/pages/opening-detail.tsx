@@ -57,6 +57,7 @@ import type {
   CriterionEvaluation,
   Opening,
 } from "@/types"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -107,15 +108,17 @@ function MatchCell({
   const meta = MATCH_META[evaluation.status]
   const Icon = meta.icon
   const cell = (
-    <span
+    <Badge
+      variant={meta.badgeVariant}
       className={cn(
-        "inline-flex animate-in items-center gap-1.5 text-xs fade-in duration-200",
+        "animate-in fade-in duration-200",
+        meta.badgeClass,
         evaluation.status === "needs_review" && "font-semibold",
       )}
     >
-      <Icon className="size-3.5" />
+      <Icon data-icon="inline-start" />
       {meta.label}
-    </span>
+    </Badge>
   )
   const reviewable = evaluation.status === "needs_review" && !!onReview
   const interactive = reviewable ? (
@@ -188,9 +191,17 @@ function ScoreCell({ candidate }: { candidate: Candidate }) {
     return <Skeleton className="h-3.5 w-10" />
   }
   return (
-    <span className="text-muted-foreground">
+    <Badge
+      variant={
+        candidate.status === "failed"
+          ? "destructive"
+          : candidate.status === "needs_review"
+            ? "default"
+            : "secondary"
+      }
+    >
       {STATUS_LABEL[candidate.status]}
-    </span>
+    </Badge>
   )
 }
 
@@ -735,7 +746,7 @@ function CandidateSection({
                                 className={cn(
                                   "size-1.5 shrink-0 rounded-full",
                                   IN_FLIGHT.has(candidate.status)
-                                    ? "animate-pulse bg-foreground/50"
+                                    ? "animate-pulse bg-primary/60"
                                     : "invisible",
                                 )}
                               />

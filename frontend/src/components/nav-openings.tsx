@@ -63,9 +63,9 @@ function NavOpeningItem({ item, active }: { item: Opening; active: boolean }) {
         <TooltipContent side="right">{item.title}</TooltipContent>
       </Tooltip>
       {item.pendingReview > 0 && (
-        // Badge shares the right edge with the hover action — shift it
-        // left of the slot the button's `has-menu-action` padding reserves.
-        <SidebarMenuBadge className="right-8 rounded-full bg-muted">
+        // Badge occupies the meatball's slot; it fades out on hover,
+        // focus, or while its dropdown is open — the action fades in.
+        <SidebarMenuBadge className="right-1 rounded-full bg-primary text-primary-foreground transition-opacity group-focus-within/menu-item:opacity-0 group-hover/menu-item:opacity-0 group-has-[[aria-expanded=true]]/menu-item:opacity-0">
           {item.pendingReview}
         </SidebarMenuBadge>
       )}
