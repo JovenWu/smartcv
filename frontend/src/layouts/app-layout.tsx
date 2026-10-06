@@ -44,8 +44,6 @@ interface RouteHandle {
 
 export function AppLayout() {
   const session = useSession()
-  // Crumb labels read the store lazily via getOpening — subscribing here
-  // re-renders them once openings arrive (deep links into /openings/:id).
   useOpenings()
   const matches = useMatches()
   const [newOpeningOpen, setNewOpeningOpen] = useState(false)

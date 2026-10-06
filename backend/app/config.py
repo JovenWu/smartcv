@@ -19,39 +19,27 @@ class Settings(BaseSettings):
     typesafe_api_key: SecretStr | None = None
     typesafe_model: str = "jev-latest"
     smartcv_fake_evaluator: bool = False
-    # Listing import agent (LangGraph + OpenRouter). Optional: endpoints
-    # return 503 when neither a key nor the fake importer is configured.
     openrouter_api_key: SecretStr | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "openai/gpt-6-luna"
     tavily_api_key: SecretStr | None = None
     smartcv_fake_importer: bool = False
     import_fetch_timeout: float = 15.0
-    # Headless-Chromium fallback for bot-protected listings (Jobstreet,
-    # LinkedIn). Slower than HTTP but runs the JS challenge a browser does.
     import_browser_enabled: bool = True
     import_browser_timeout: float = 60.0
     import_llm_timeout: float = 90.0
     import_max_chars: int = 40_000
     import_min_source_chars: int = 800
-    # JSON map of username -> password, e.g. {"recruiter": "s3cret"}.
-    # Empty disables the demo gate entirely.
     smartcv_accounts: str = ""
-    # Expose /docs, /redoc and /openapi.json. Off by default — enable
-    # only for local development, never on a public deployment.
     smartcv_api_docs: bool = False
     max_batch_files: int = 200
     max_file_bytes: int = 10_000_000
     worker_count: int = Field(default=4, ge=1)
     review_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
-    # Second-pass review: needs_review cells are escalated to the
-    # OpenRouter reasoning model before surfacing to a human. Requires
-    # OPENROUTER_API_KEY; cells the model cannot decide stay flagged.
     escalation_enabled: bool = True
     escalation_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     escalation_timeout: float = 120.0
     data_dir: Path = DEFAULT_DATA_DIR
-    # When unset, derived from data_dir so a custom data_dir stays isolated.
     database_path: Path | None = None
 
     @model_validator(mode="after")

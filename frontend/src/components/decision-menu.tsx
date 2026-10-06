@@ -28,12 +28,6 @@ const DECISION_META: Record<
   passed: { icon: CircleXIcon, label: "Rejected" },
 }
 
-/**
- * Compact decision control for a scorecard row — the trigger echoes the
- * current decision (icon + label), the menu is an exclusive radio group.
- * The store upserts the response; the candidate.updated SSE echo lands on
- * the same value, so no dedupe dance is needed.
- */
 export function DecisionMenu({
   openingId,
   candidate,

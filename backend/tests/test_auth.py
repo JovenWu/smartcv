@@ -143,7 +143,6 @@ def test_login_is_rate_limited_after_ten_failures(gated_client):
     blocked = gated_client.post("/api/auth/login", json=bad)
     assert blocked.status_code == 429
     assert blocked.json()["detail"] == "Too many attempts, try again later"
-    # Still locked out on the next bad attempt inside the window.
     assert gated_client.post("/api/auth/login", json=bad).status_code == 429
 
 
@@ -156,7 +155,6 @@ def test_successful_login_resets_the_rate_limit(gated_client):
         json={"username": "recruiter", "password": "s3cret"},
     )
     assert ok.status_code == 204
-    # The counter was cleared: a fresh bad attempt is a plain 401.
     assert gated_client.post("/api/auth/login", json=bad).status_code == 401
 
 

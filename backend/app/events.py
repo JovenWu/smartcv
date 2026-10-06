@@ -4,11 +4,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
-# Per-subscriber backlog cap — a stalled SSE client must not grow
-# memory unboundedly; on overflow it is dropped (sentinel-closed).
 _SUBSCRIBER_QUEUE_MAX = 256
 
-# Enqueued into a subscriber queue to terminate its async iterator.
 _CLOSE = object()
 
 
@@ -60,7 +57,6 @@ class EventHub:
         try:
             queue.put_nowait(item)
         except asyncio.QueueFull:
-            # The queue is full, so this always frees a slot.
             queue.get_nowait()
             queue.put_nowait(item)
 
@@ -72,7 +68,6 @@ class EventHub:
             try:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
-                # Slow consumer: drop it instead of growing the queue.
                 queues.discard(queue)
                 self._offer(queue, _CLOSE)
         if not queues:
@@ -103,8 +98,6 @@ class EventPublisher:
     ) -> None:
         candidate = await self.repository.get_candidate_result(candidate_id)
         if candidate is None:
-            # Deleted mid-flight — the delete endpoint publishes
-            # candidate.deleted itself.
             return
         counts = await self.repository.candidate_counts(opening_id)
         completed_count, total_count = counts

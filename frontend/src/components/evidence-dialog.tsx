@@ -22,10 +22,6 @@ import {
 } from "@/components/ui/dialog"
 import { Skeleton } from "@/components/ui/skeleton"
 
-/**
- * Lists a candidate's evidence excerpts grouped by criterion. Each excerpt
- * carries a page chip that opens the CV viewer deep-linked to that page.
- */
 export function EvidenceDialog({
   opening,
   candidate,
@@ -39,8 +35,6 @@ export function EvidenceDialog({
 }) {
   const { openCv } = useCvViewer()
   const candidateId = candidate?.id
-  // Results are tagged with the candidate they belong to, so a target switch
-  // never shows stale excerpts — no reset effect needed.
   const [result, setResult] = useState<{
     id: string
     spans: EvidenceSpan[]

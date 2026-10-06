@@ -14,8 +14,6 @@ import type { MatchStatus } from "@/types"
 
 type BadgeVariant = VariantProps<typeof badgeVariants>["variant"]
 
-/** Icon, label and badge tone per status. needs_review stays solid gold —
- *  the actionable state — while resolved states use soft tinted badges. */
 export const MATCH_META: Record<
   MatchStatus,
   {

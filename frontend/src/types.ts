@@ -4,8 +4,6 @@
  * server-side; the UI never mutates them directly.
  */
 
-// ---------- Openings ----------
-
 export type OpeningStatus = "draft" | "open" | "closed" | "archived"
 
 export type EmploymentType =
@@ -38,7 +36,6 @@ export interface Opening {
   experienceLevel?: string
   /** Free text like "Bachelor's degree". */
   educationLevel?: string
-  /** Flat skill tags — can seed suggested criteria later. */
   skills?: string[]
   /** Applications close after this date (job board validThrough). */
   closesAt?: string
@@ -48,12 +45,9 @@ export interface Opening {
   createdAt: string
   updatedAt?: string
 
-  // Computed on the backend; present here so the UI sketch runs standalone.
   candidates: number
   pendingReview: number
 }
-
-// ---------- Criteria (the rubric per opening) ----------
 
 export interface Criterion {
   id: string
@@ -64,12 +58,9 @@ export interface Criterion {
   weight: number
   /** Knockout: a failed must-have overrides the weighted total. */
   required?: boolean
-  /** AI-proposed weight before recruiter confirmation. */
   suggestedWeight?: number
   suggestionConfidence?: number
 }
-
-// ---------- Candidates (one per uploaded CV) ----------
 
 export type CandidateStatus =
   | "queued"
@@ -82,7 +73,6 @@ export type CandidateStatus =
 /** The recruiter's call — the tool never auto-rejects. */
 export type CandidateDecision = "undecided" | "shortlisted" | "passed"
 
-/** Response of POST /api/openings/{id}/candidates/bulk-decision. */
 export interface BulkDecisionResult {
   updated: number
 }
@@ -116,8 +106,6 @@ export interface Candidate {
   retryable: boolean
 }
 
-// ---------- Evaluations (scorecard cells) ----------
-
 export type MatchStatus =
   | "strong"
   | "partial"
@@ -142,8 +130,6 @@ export interface CriterionEvaluation {
   reviewedBy?: string
   reviewedAt?: string
 }
-
-// ---------- Evidence ----------
 
 export interface EvidenceSpan {
   id: string

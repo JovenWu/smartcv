@@ -158,9 +158,6 @@ async def suggest_criteria(
     return CriteriaSuggestionResponse(suggestions=suggestions)
 
 
-# ---------- openings ----------
-
-
 @router.post("/openings", status_code=201, response_model=Opening)
 async def create_opening(body: OpeningCreate, request: Request) -> Opening:
     repository = _repository(request)
@@ -200,8 +197,6 @@ async def update_opening(
 @router.delete("/openings/{opening_id}", status_code=204)
 async def delete_opening(opening_id: str, request: Request) -> None:
     repository = _repository(request)
-    # Capture candidate ids up front so queued worker items can be
-    # discarded once the rows are gone.
     candidate_ids = [
         candidate.id
         for candidate in await repository.list_candidates(opening_id)
@@ -214,9 +209,6 @@ async def delete_opening(opening_id: str, request: Request) -> None:
     )
     _discard_pending(request, candidate_ids)
     await _close_opening_stream(request.app.state.event_hub, opening_id)
-
-
-# ---------- listing import ----------
 
 
 def _importer(request: Request):
@@ -241,7 +233,7 @@ def _import_http_error(error: Exception) -> HTTPException:
         status_code, detail = 503, "Listing import is unavailable"
     elif isinstance(error, ListingNotReadable):
         status_code, detail = 422, "Listing import failed"
-    else:  # ImportProviderError
+    else:
         status_code, detail = 502, "Listing import failed"
     log.warning(
         "Listing import failed (%s): %s", type(error).__name__, error
@@ -357,9 +349,6 @@ async def import_file(request: Request, file: UploadFile = File(...)):
         await asyncio.to_thread(_unlink_paths, (staged,))
 
 
-# ---------- candidates ----------
-
-
 @router.post(
     "/openings/{opening_id}/candidates",
     status_code=201,
@@ -442,8 +431,6 @@ async def upload_candidates(
             queued.append(candidate_id)
         else:
             failures[candidate_id] = error
-    # Single commit for the whole batch; on failure every file written
-    # above is an orphan and must be removed (no rows landed).
     if new_items:
         try:
             await repository.add_candidates(opening_id, new_items)
@@ -514,8 +501,6 @@ async def delete_candidate(
     _discard_pending(request, (candidate_id,))
     publisher = request.app.state.event_publisher
     publisher.publish_candidate_deleted(opening_id, candidate_id)
-    # publish_opening_progress also runs the terminal check, which may
-    # emit opening.complete when this was the last non-terminal row.
     await publisher.publish_opening_progress(opening_id)
 
 
@@ -544,8 +529,6 @@ async def opening_event_stream(
     async with hub.subscribe(opening_id) as subscriber:
         snapshot = await repository.get_opening_snapshot(opening_id)
         if snapshot is None:
-            # Opening was deleted between the route check and now —
-            # close the stream instead of crashing on model_dump.
             return
         yield _encode_sse(
             "snapshot", snapshot.model_dump(mode="json", by_alias=True)
@@ -561,11 +544,9 @@ async def opening_event_stream(
                 yield ": hb\n\n"
                 continue
             except StopAsyncIteration:
-                # Hub closed the subscriber (e.g. opening deleted).
                 return
             name = getattr(event, "name", None)
             if name is None or name == "close":
-                # Close sentinel from the hub — end the stream.
                 return
             yield _encode_sse(name, event.payload)
             if name in _STREAM_END_EVENTS:

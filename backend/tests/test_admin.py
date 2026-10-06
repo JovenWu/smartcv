@@ -51,7 +51,6 @@ def test_admin_lists_and_creates_users(admin_client):
     users = admin_client.get("/api/admin/users").json()
     assert {u["username"] for u in users} == {"recruiter", "guest"}
     by_name = {u["username"]: u for u in users}
-    # First seeded account becomes admin; the rest do not.
     assert by_name["recruiter"]["isAdmin"] is True
     assert by_name["guest"]["isAdmin"] is False
 
@@ -88,7 +87,6 @@ def test_update_user_toggle_and_self_protection(admin_client):
     guest = next(u for u in users if u["username"] == "guest")
     admin = next(u for u in users if u["username"] == "recruiter")
 
-    # Promote then demote the guest.
     updated = admin_client.patch(
         f"/api/admin/users/{guest['id']}", json={"isAdmin": True}
     ).json()
@@ -98,7 +96,6 @@ def test_update_user_toggle_and_self_protection(admin_client):
     ).json()
     assert updated["isAdmin"] is False
 
-    # An admin cannot neuter itself.
     assert (
         admin_client.patch(
             f"/api/admin/users/{admin['id']}", json={"isActive": False}
@@ -144,12 +141,9 @@ def test_reset_password_rotates_credentials(admin_client):
     )
     assert _login(admin_client, "guest", "demo123").status_code == 401
     assert _login(admin_client, "guest", "newpass123").status_code == 204
-    # The successful guest login replaced this client's cookie — switch
-    # back to the admin session before asserting admin-route behavior.
     assert (
         _login(admin_client, "recruiter", "s3cret").status_code == 204
     )
-    # Unknown ids 404 rather than silently succeeding.
     assert (
         admin_client.post(
             "/api/admin/users/nope/reset-password",
@@ -170,13 +164,11 @@ def test_change_password_self_service(admin_client):
         ).status_code
         == 204
     )
-    # Current session survives (fresh cookie re-issued); old password dies.
     assert admin_client.get("/api/auth/session").status_code == 200
     assert _login(admin_client, "recruiter", "s3cret").status_code == 401
     assert (
         _login(admin_client, "recruiter", "rotated123").status_code == 204
     )
-    # Wrong current password is rejected.
     assert (
         admin_client.post(
             "/api/auth/password",

@@ -58,8 +58,6 @@ class CandidateWorkerPool:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._pending: set[str] = set()
         self._tasks: list[asyncio.Task] = []
-        # Criteria-changing opening patches requeue candidates through
-        # the pool (repository keeps no worker reference — no cycle).
         set_requeue_hook = getattr(repository, "set_requeue_hook", None)
         if set_requeue_hook is not None:
             set_requeue_hook(self.enqueue)

@@ -26,9 +26,6 @@ from backend.app.users import (
 SESSION_COOKIE = "smartcv_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
 
-# In-memory per-IP login throttling: more than this many failed attempts
-# inside the sliding window -> 429 until the window drains or a login
-# succeeds.
 LOGIN_RATE_LIMIT_ATTEMPTS = 10
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 60.0
 
@@ -214,8 +211,6 @@ async def change_password(
         )
     digest = await asyncio.to_thread(hash_password, body.new_password)
     await repository.set_user_password(user.id, digest)
-    # Rotate every session, then hand this client a fresh cookie so the
-    # acting user is not logged out by their own change.
     await repository.delete_user_sessions(user.id)
     token = await repository.create_session(user.id, SESSION_TTL_SECONDS)
     response.set_cookie(

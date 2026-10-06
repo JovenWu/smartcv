@@ -170,12 +170,10 @@ async def test_close_opening_terminates_subscribers():
             )
             assert event.name == "opening.deleted"
             assert event.payload == {"openingId": "o1"}
-            # The close sentinel ends the iterator.
             with pytest.raises(StopAsyncIteration):
                 await asyncio.wait_for(
                     subscriber.__aiter__().__anext__(), 1
                 )
-        # Other openings' subscribers are untouched.
         hub.publish("other", OpeningEvent("opening.progress", {}))
         event = await asyncio.wait_for(
             untouched.__aiter__().__anext__(), 1
@@ -197,13 +195,10 @@ async def test_slow_subscriber_is_dropped_on_overflow():
                 "o1",
                 OpeningEvent("opening.progress", {"i": index}),
             )
-        # The queue filled at maxsize; the oldest event was evicted for
-        # the close sentinel, so iteration ends after maxsize - 1 items.
         received = []
         async for event in subscriber:
             received.append(event)
         assert len(received) == _SUBSCRIBER_QUEUE_MAX - 1
-        # The subscriber was dropped — later publishes never arrive.
         hub.publish("o1", OpeningEvent("opening.progress", {"i": -1}))
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(

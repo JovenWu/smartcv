@@ -9,17 +9,12 @@ import type {
   OpeningStatus,
 } from "@/types"
 
-/**
- * Thin fetch wrapper — unwraps FastAPI `{detail}` error bodies and returns
- * parsed JSON. Mirrors lib/auth.ts so callers see the same error style.
- */
 async function parseError(response: Response): Promise<Error> {
   let detail = `Request failed (${response.status})`
   try {
     const body = (await response.json()) as { detail?: unknown }
     if (typeof body.detail === "string") detail = body.detail
   } catch {
-    // Non-JSON body — keep the status-based message.
   }
   return new Error(detail)
 }
@@ -53,7 +48,6 @@ export async function apiFetch<T>(
   try {
     return (await response.json()) as T
   } catch (err) {
-    // OK status with an empty/non-JSON body — treat like a 204.
     if (err instanceof SyntaxError) return undefined as T
     throw err
   }
@@ -66,8 +60,6 @@ function jsonPost<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   })
 }
-
-// ---------- API payloads ----------
 
 export interface NewCriterionPayload {
   id: string
@@ -104,7 +96,6 @@ export interface ImportCriterion {
   suggestionConfidence?: number
 }
 
-/** Reviewer-editable extraction result; persisted only on form submit. */
 export interface ImportDraft {
   title: string
   department: string
@@ -181,13 +172,10 @@ export const openingsApi = {
     ),
 }
 
-/** PATCH body for the per-criterion review endpoint. */
 export interface CriterionReview {
   matchLevel: "strong" | "partial" | "not_found"
   reviewNote?: string
 }
-
-// ---------- admin user management ----------
 
 export interface UserInfo {
   id: string

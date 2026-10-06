@@ -63,9 +63,7 @@ describe("CvViewerLayout", () => {
     const page = screen.getByTestId("page")
 
     await user.click(screen.getByRole("button", { name: "Open CV" }))
-    // Viewer panel is open…
     expect(screen.getByText("Ada Lovelace")).toBeInTheDocument()
-    // …and the page subtree is literally the same DOM node — no remount.
     expect(screen.getByTestId("page")).toBe(page)
 
     await user.click(screen.getByRole("button", { name: "Close CV" }))
@@ -82,7 +80,6 @@ describe("CvViewerLayout", () => {
     await user.click(screen.getByRole("button", { name: "Open CV" }))
     expect(state()).toHaveTextContent("collapsed")
 
-    // The collapse is not a lock — the user can still toggle the sidebar.
     await user.click(screen.getByRole("button", { name: "Toggle sidebar" }))
     expect(state()).toHaveTextContent("expanded")
     await user.click(screen.getByRole("button", { name: "Toggle sidebar" }))

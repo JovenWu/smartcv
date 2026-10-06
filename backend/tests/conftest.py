@@ -1,7 +1,5 @@
 import pytest
 
-# SmartCV runtime env vars (backend/.env) must not leak into tests —
-# e.g. SMARTCV_ACCOUNTS silently enables auth and 401s every request.
 _ENV_VARS = [
     "SMARTCV_ACCOUNTS",
     "SMARTCV_FAKE_EVALUATOR",

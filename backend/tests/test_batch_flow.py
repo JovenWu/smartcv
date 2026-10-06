@@ -207,6 +207,6 @@ def test_demo_batch_generation(tmp_path, monkeypatch):
     files = list(output.iterdir())
     pdfs = [f for f in files if f.suffix == ".pdf"]
     docxs = [f for f in files if f.suffix == ".docx"]
-    assert len(files) == 26  # 25 CVs + opening.json
+    assert len(files) == 26
     assert len(pdfs) == 15
     assert len(docxs) == 10

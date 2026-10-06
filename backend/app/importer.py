@@ -41,8 +41,6 @@ _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "SmartCV/1.0 (+https://localhost)"
 )
-# Real-Chrome UA for the headless-browser tier — the bot challenge reads
-# it, so it must look like a normal desktop browser.
 _CHROME_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -57,12 +55,9 @@ _WS_RE = re.compile(r"\s+")
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
-# Link fetches are capped and never touch private/loopback hosts — the URL
-# comes from user input and its content is returned to the caller.
 _MAX_FETCH_BYTES = 2 * 1024 * 1024
 _MAX_REDIRECTS = 5
 
-# Chromium processes are heavy; parallel imports share this pool.
 _BROWSER_SEMAPHORE = asyncio.Semaphore(2)
 
 _ResolvedAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -292,7 +287,7 @@ async def _resolve_host(host: str) -> list[_ResolvedAddress]:
     addresses: list[_ResolvedAddress] = []
     for info in infos:
         sockaddr = info[4]
-        raw = str(sockaddr[0]).split("%", 1)[0]  # strip IPv6 scope id
+        raw = str(sockaddr[0]).split("%", 1)[0]
         try:
             addresses.append(ipaddress.ip_address(raw))
         except ValueError:
@@ -402,8 +397,6 @@ class LangGraphImporter:
                 "Listing extraction returned unreadable data"
             ) from error
 
-    # ---------- graph nodes ----------
-
     def _build_graph(self):
         builder = StateGraph(ImportState)
         builder.add_node("gather", self._gather)
@@ -425,8 +418,6 @@ class LangGraphImporter:
         source = state["source"]
         if source.kind == "link":
             url = _canonical_listing_url(source.url)
-            # Resolutions are memoized for this one request (redirect
-            # loops and the browser tier re-check the same hosts).
             dns_cache: _DnsCache = {}
             text = await self._fetch_link(url, dns_cache)
             warnings: list[str] = []
@@ -515,7 +506,7 @@ class LangGraphImporter:
                         if not location:
                             return ""
                         current = urljoin(current, location)
-                        continue  # re-validated at loop top
+                        continue
                     if response.status_code >= 400:
                         return ""
                     content_type = response.headers.get("content-type", "")
@@ -565,7 +556,6 @@ class LangGraphImporter:
         async def _route_guard(route):
             await _guard_browser_route(route, dns_cache)
 
-        # Semaphore-capped: each render owns a Chromium process.
         async with _BROWSER_SEMAPHORE:
             try:
                 async with async_playwright() as playwright:
@@ -582,10 +572,6 @@ class LangGraphImporter:
                             "Object.defineProperty(navigator, 'webdriver',"
                             " {get: () => undefined})"
                         )
-                        # Intercept BEFORE any navigation: the guard
-                        # re-validates every request the context makes —
-                        # redirect hops, subresources, popups — so a page
-                        # can never talk to a non-public host.
                         await context.route("**/*", _route_guard)
                         page = await context.new_page()
                         await page.goto(
@@ -593,9 +579,6 @@ class LangGraphImporter:
                             wait_until="domcontentloaded",
                             timeout=timeout_ms,
                         )
-                        # Bot-check interstitials ("Just a moment…", security
-                        # verification) auto-resolve after their JS runs; poll
-                        # the title until the real page appears.
                         remaining = timeout_ms
                         while remaining > 0:
                             title = (await page.title()).lower()
@@ -603,7 +586,7 @@ class LangGraphImporter:
                                 break
                             await page.wait_for_timeout(2000)
                             remaining -= 2000
-                        await _check_url(page.url, dns_cache)  # backstop
+                        await _check_url(page.url, dns_cache)
                         text = await page.evaluate("document.body.innerText")
                     finally:
                         await browser.close()
@@ -617,8 +600,6 @@ class LangGraphImporter:
         return str(text or "")[: self.settings.import_max_chars]
 
     def _needs_search(self, state: ImportState) -> str:
-        # Web search only helps links (blocked/JS-heavy boards); file
-        # uploads are read directly by the model.
         source = state["source"]
         thin = len(state["source_text"]) < self.settings.import_min_source_chars
         if (
@@ -761,9 +742,6 @@ class LangGraphImporter:
                 "Listing extraction returned unreadable data"
             ) from error
         if not str(draft.get("title") or "").strip():
-            # The source wasn't one specific job ad (blocked page, search
-            # junk, category listing). Fail honestly rather than save a
-            # fabricated opening.
             raise ListingNotReadable(
                 "Could not find a specific job listing at that source "
                 "(the site may block automated access). Try dropping a "
@@ -771,9 +749,6 @@ class LangGraphImporter:
             )
         return {"draft": draft}
 
-    # A duration requirement counts as covered only when a criterion names
-    # a concrete span ("3-5 years", "2 tahun") — a generic "experience"
-    # criterion does not encode the listing's minimum.
     _YEARS_RE = re.compile(
         r"\d+\s*[-–+]?\s*\d*\s*(?:years?|yrs?|tahun)", re.IGNORECASE
     )
@@ -800,8 +775,6 @@ class LangGraphImporter:
         draft = state["draft"]
         criteria = list(draft.get("criteria") or [])
         warnings = list(state["warnings"])
-        # Backstop: stated minimums extracted into the level fields must
-        # also exist as concrete, weightable criteria.
         experience_level = (draft.get("experienceLevel") or "").strip()
         if experience_level and not self._covered_by_criteria(
             criteria, self._YEARS_RE, experience_level

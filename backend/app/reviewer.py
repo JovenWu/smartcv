@@ -186,8 +186,6 @@ class LlmReviewer:
             content = response.json()["choices"][0]["message"]["content"]
             data = json.loads(content)
         except Exception as error:
-            # Escalation must never break the pipeline — any failure
-            # (HTTP, timeout, malformed JSON) leaves the flags in place.
             log.warning("Second-pass review failed: %r", error)
             return {}
         return self._resolve(
@@ -218,8 +216,6 @@ class LlmReviewer:
                 and isinstance(confidence, (int, float))
                 and not isinstance(confidence, bool)
                 and confidence >= self.settings.escalation_min_confidence
-                # Same consistency rule as the first pass: a positive
-                # verdict must cite a real span, not_found must not.
                 and (level == "not_found") == (evidence_id is None)
                 and (evidence_id is None or evidence_id in span_ids)
             )
@@ -233,8 +229,6 @@ class LlmReviewer:
                     rationale=rationale,
                 )
             else:
-                # Keep the flag, but surface the model's reasoning so
-                # the human reviewer doesn't start from scratch.
                 resolved[criterion_id] = original.model_copy(
                     update={"rationale": rationale}
                 )

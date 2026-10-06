@@ -95,10 +95,6 @@ function CvViewerPanel({
 export function CvViewerProvider({ children }: { children: ReactNode }) {
   const [selected, setSelected] = useState<Candidate | null>(null)
   const { open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar()
-  // Pending restore of the user's sidebar state, run when the viewer
-  // closes. Kept in a ref rather than an effect dep: setOpen's identity
-  // changes on every sidebar toggle, so a cleanup keyed on it would fire
-  // mid-session and snap the sidebar back to its pre-viewer state.
   const restoreSidebar = useRef<(() => void) | null>(null)
 
   const openCv = (candidate: Candidate) => {
@@ -143,9 +139,6 @@ export function CvViewerLayout({ children }: { children: ReactNode }) {
         orientation="horizontal"
         className="min-w-0 flex-1"
       >
-        {/* Padding lives on the panel, not the frame: the library wraps
-            panel children in an internal scroll region where a margin
-            inflates scrollHeight and yields a phantom page scrollbar. */}
         <ResizablePanel
           minSize="30%"
           className={cn(

@@ -41,7 +41,6 @@ describe("ManualOpeningForm skill suggestions", () => {
     render(<ManualOpeningForm onDone={() => {}} />)
     const skills = screen.getByLabelText("Skills")
 
-    // Typing inside the debounce window must not send requests.
     fireEvent.change(skills, { target: { value: "Graph" } })
     act(() => void vi.advanceTimersByTime(300))
     fireEvent.change(skills, { target: { value: "GraphQL" } })
@@ -53,7 +52,6 @@ describe("ManualOpeningForm skill suggestions", () => {
     })
     expect(suggest).toHaveBeenCalledOnce()
     expect(suggest.mock.calls[0][0].skills).toEqual(["GraphQL"])
-    // Skills input + the new criterion row both display the term.
     expect(screen.getAllByDisplayValue("GraphQL")).toHaveLength(2)
     expect(
       screen.getAllByPlaceholderText("e.g. React experience"),

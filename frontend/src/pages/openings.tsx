@@ -73,9 +73,6 @@ function OpeningCard({
     opening.candidates > 0 ? (screened / opening.candidates) * 100 : 0
   const archived = opening.status === "archived"
 
-  // The menu trigger must NOT live inside the anchor: a <button> inside
-  // <a> is invalid HTML, and a menu item unmounting mid-click lets the
-  // release land on the link — navigating instead of running the action.
   return (
     <div className="relative h-full">
       <Link
@@ -97,7 +94,6 @@ function OpeningCard({
                     {opening.pendingReview}
                   </span>
                 )}
-                {/* Reserves the slot the absolute-positioned menu occupies. */}
                 <span className="size-7" aria-hidden />
               </div>
             </div>

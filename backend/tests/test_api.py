@@ -159,7 +159,6 @@ def test_duplicate_upload_is_skipped(client):
     assert first.status_code == 201
     assert len(first.json()["candidates"]) == 1
 
-    # Same bytes under a different filename is still a duplicate.
     second = client.post(
         f"/api/openings/{opening_id}/candidates",
         files=[("files", ("jane-copy.pdf", payload, "application/pdf"))],
@@ -393,14 +392,12 @@ def test_delete_candidate_removes_row_file_and_allows_reupload(
         client.get(f"/api/openings/{opening_id}/candidates").json() == []
     )
     assert not stored.exists()
-    # Deleting twice is a 404.
     assert (
         client.delete(
             f"/api/openings/{opening_id}/candidates/{candidate_id}"
         ).status_code
         == 404
     )
-    # The file hash is gone with the row: re-uploading is not a dupe.
     reupload = _upload_one(client, opening_id, "jane-copy.pdf", payload)
     assert len(reupload["candidates"]) == 1
     assert reupload["duplicates"] == []
@@ -478,7 +475,6 @@ def test_batch_insert_failure_unlinks_orphan_files(
     ]
     with pytest.raises(RuntimeError, match="db exploded"):
         client.post(f"/api/openings/{opening_id}/candidates", files=files)
-    # No candidate rows and no orphaned uploads remain.
     assert (
         client.get(f"/api/openings/{opening_id}/candidates").json() == []
     )
@@ -494,8 +490,6 @@ async def test_opening_event_stream_handles_missing_opening(tmp_path):
             opening_id,
             OpeningCreate(title="Role", criteria=make_criteria()),
         )
-        # Deleted before the stream's snapshot read — the generator must
-        # end quietly instead of crashing on snapshot.model_dump.
         await repository.delete_opening(opening_id)
         chunks = [
             chunk
@@ -521,7 +515,6 @@ async def test_opening_event_stream_ends_on_opening_deleted(tmp_path):
         stream = api_module.opening_event_stream(repository, hub, opening_id)
         first = await anext(stream)
         assert first.startswith("event: snapshot")
-        # Opening deleted mid-flight: hub pushes opening.deleted + close.
         await repository.delete_opening(opening_id)
         hub.close_opening(opening_id)
         chunks = [chunk async for chunk in stream]

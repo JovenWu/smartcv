@@ -61,9 +61,6 @@ def create_app(
         settings.previews_dir.mkdir(parents=True, exist_ok=True)
         repository = SQLiteRepository(settings.database_path)
         await repository.open()
-        # Seed env-configured accounts into the users table, then decide
-        # whether the app is gated. DB users keep auth on even if
-        # SMARTCV_ACCOUNTS is later emptied (managed accounts persist).
         await repository.seed_accounts(
             settings.demo_accounts, hash_password, verify_password
         )
@@ -139,9 +136,6 @@ def create_app(
     app.include_router(admin_router)
     app.include_router(api_router)
 
-    # Serve the built SPA when frontend/dist exists (single-container
-    # deployment). /api routes are registered above and win; unknown /api
-    # paths must stay JSON 404s, not fall back to index.html.
     frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     if frontend_dist.is_dir():
         assets_dir = frontend_dist / "assets"

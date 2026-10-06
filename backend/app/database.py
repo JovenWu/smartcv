@@ -155,15 +155,11 @@ _SCHEMA = "\n".join(
     )
 )
 
-# Fresh DDL used when _migrate has to rebuild a legacy child table.
 _TABLE_DDL = {
     "criteria": _CRITERIA_DDL,
     "candidates": _CANDIDATES_DDL,
 }
 
-# Idempotent indexes for the hot read paths (openings list, candidate
-# list, per-candidate evaluations/spans). Applied after _migrate so a
-# legacy database has its opening_id columns in place first.
 _INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_candidates_opening
     ON candidates(opening_id);
@@ -177,7 +173,6 @@ CREATE INDEX IF NOT EXISTS idx_evaluations_candidate
     ON evaluations(candidate_id);
 """
 
-# (name, DDL) added to legacy tables when absent.
 _OPENING_COLUMNS = [
     ("department", "TEXT NOT NULL DEFAULT ''"),
     ("location", "TEXT NOT NULL DEFAULT ''"),
@@ -265,8 +260,6 @@ class SQLiteRepository:
         self._path = path
         self._db: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
-        # Callback used to requeue candidates after a criteria-changing
-        # patch; the worker pool registers its enqueue() here.
         self._requeue: Callable[[str], None] | None = None
 
     def set_requeue_hook(
@@ -445,8 +438,6 @@ class SQLiteRepository:
             await self.db.executemany(
                 "UPDATE candidates SET file_hash = ? WHERE id = ?", updates
             )
-
-    # ---------- openings ----------
 
     async def create_opening(
         self, opening_id: str, data: OpeningCreate
@@ -708,9 +699,6 @@ class SQLiteRepository:
                     requeue_ids = await self._apply_criteria_patch(
                         opening_id, patch.criteria
                     )
-                    # Evaluations were disturbed — the opening can no
-                    # longer be considered terminal. Non-criteria
-                    # patches never touch is_final.
                     await self.db.execute(
                         "UPDATE openings SET is_final = 0 WHERE id = ?",
                         (opening_id,),
@@ -773,7 +761,6 @@ class SQLiteRepository:
                 f"WHERE id IN ({placeholders})",
                 (CandidateStatus.QUEUED, *requeue_ids),
             )
-        # Recompute totals for candidates that kept full eval coverage.
         from backend.app.scoring import (
             calculate_total_score,
             effective_fractions,
@@ -794,8 +781,6 @@ class SQLiteRepository:
                 (total, candidate_id),
             )
         return requeue_ids
-
-    # ---------- candidates ----------
 
     async def add_candidates(
         self, opening_id: str, items: Iterable[Mapping[str, Any]]
@@ -821,8 +806,6 @@ class SQLiteRepository:
                     for item in items
                 ],
             )
-            # Newly queued work means the opening is no longer terminal —
-            # a previously completed opening must reopen for SSE streams.
             await self.db.execute(
                 "UPDATE openings SET is_final = 0 WHERE id = ?", (opening_id,)
             )
@@ -1304,8 +1287,6 @@ class SQLiteRepository:
                 (row["stored_path"], row["preview_path"])
                 for row in await cursor.fetchall()
             ]
-            # Manual cascade — keeps working on databases that predate
-            # PRAGMA foreign_keys, and children must go before parents.
             await self.db.execute(
                 "DELETE FROM evaluations WHERE candidate_id IN "
                 "(SELECT id FROM candidates WHERE opening_id = ?)",
@@ -1395,8 +1376,6 @@ class SQLiteRepository:
             )
             await self.db.commit()
             return cursor.rowcount == 1
-
-    # ---------- users & sessions ----------
 
     @staticmethod
     def _user_from_row(row: aiosqlite.Row) -> UserInfo:

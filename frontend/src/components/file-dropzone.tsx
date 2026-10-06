@@ -2,10 +2,6 @@ import { useRef, useState } from "react"
 import { FileUpIcon } from "lucide-react"
 import { cn } from "cn"
 
-/**
- * Does a file match an `accept` attribute token list?
- * Handles ".pdf" extensions, "image/*" mime wildcards and exact mime types.
- */
 function matchesAccept(file: File, accept?: string): boolean {
   if (!accept) return true
   const name = file.name.toLowerCase()
@@ -42,8 +38,6 @@ export function FileDropzone({
 }) {
   const [dragging, setDragging] = useState(false)
   const [skipped, setSkipped] = useState<string[]>([])
-  // dragenter/dragleave fire per child while moving inside the zone — a
-  // depth counter keeps the highlight steady until the pointer truly exits.
   const dragDepth = useRef(0)
 
   const acceptFiles = (files: File[]) => {

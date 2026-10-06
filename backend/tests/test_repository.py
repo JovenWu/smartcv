@@ -153,7 +153,7 @@ async def test_update_opening_and_decision(repo):
     cand = await repo.update_decision("c1", CandidateDecision.SHORTLISTED)
     assert cand is not None
     assert cand.decision == CandidateDecision.SHORTLISTED
-    assert cand.name == "A"  # filename stem fallback
+    assert cand.name == "A"
     assert cand.opening_id == "o1"
 
 
@@ -265,13 +265,10 @@ async def test_migrates_legacy_jobs_schema(tmp_path):
         assert opening.title == "Legacy Job"
         assert opening.criteria[0].id == "py"
         assert opening.criteria[0].required is False
-        # Migrated timestamps use the same ISO-8601 UTC format as _utcnow.
         cursor = await repo.db.execute(
             "SELECT created_at FROM openings WHERE id = 'j1'"
         )
         assert (await cursor.fetchone())["created_at"].endswith("+00:00")
-        # Child tables were rebuilt to reference openings — foreign key
-        # enforcement would otherwise reject every later INSERT.
         cursor = await repo.db.execute(
             "PRAGMA foreign_key_list(candidates)"
         )
@@ -284,7 +281,6 @@ async def test_migrates_legacy_jobs_schema(tmp_path):
         assert {
             row["table"] for row in await cursor.fetchall()
         } == {"openings"}
-        # Legacy rows carried over, and writes keep working.
         candidate = await repo.get_candidate_result("c1")
         assert candidate is not None
         assert candidate.opening_id == "j1"
@@ -351,7 +347,6 @@ async def test_created_at_uses_single_utc_iso8601_format(repo):
         "SELECT created_at, updated_at FROM openings WHERE id = 'o1'"
     )
     value = (await cursor.fetchone())["created_at"]
-    # Round-trips through the exact format _utcnow() emits.
     assert value == datetime.fromisoformat(value).isoformat()
     assert value.endswith("+00:00")
 
@@ -362,7 +357,6 @@ async def test_archived_status_round_trip(repo):
     updated = await repo.update_opening("o1", patch)
     assert updated is not None
     assert updated.status == OpeningStatus.ARCHIVED
-    # list_openings returns every opening, archived included.
     listed = {o.id: o for o in await repo.list_openings()}
     assert listed["o1"].status == OpeningStatus.ARCHIVED
 
@@ -397,7 +391,6 @@ async def test_delete_candidate_cascades_and_returns_paths(repo, tmp_path):
             f"SELECT COUNT(*) AS n FROM {table} WHERE {where}"
         )
         assert (await cursor.fetchone())["n"] == 0
-    # Sibling candidate is untouched; repeat delete is a no-op.
     assert await repo.get_candidate_result("c2") is not None
     assert await repo.delete_candidate("c1") is None
 
@@ -444,7 +437,6 @@ async def test_delete_opening_cascades_and_returns_paths(repo, tmp_path):
             "WHERE candidate_id IN ('c1', 'c2')"
         )
         assert (await cursor.fetchone())["n"] == 0
-    # The other opening and its candidate survive intact.
     assert await repo.get_opening("o2") is not None
     assert (await repo.get_candidate_result("c3")).total_score == 80.0
     assert await repo.delete_opening("o1") is None
@@ -460,7 +452,6 @@ async def test_bulk_set_decision_counts_and_scopes(repo):
     updated = await repo.bulk_set_decision(
         "o1", ["c1", "c2", "c3", "ghost"], CandidateDecision.SHORTLISTED
     )
-    # c3 belongs to another opening; ghost does not exist.
     assert updated == 2
     assert (
         await repo.get_candidate_result("c1")
@@ -500,7 +491,6 @@ async def test_criteria_patch_prunes_evals_requeues_and_unfinalizes(repo):
     )
     await _add_candidate(repo, "o1", "c1")
     await _add_candidate(repo, "o1", "c2")
-    # c1 was evaluated for all three criteria; c2 only for python.
     await repo.save_candidate_result(
         "c1",
         [_eval("python"), _eval("production"), _eval("postgresql")],
@@ -522,13 +512,10 @@ async def test_criteria_patch_prunes_evals_requeues_and_unfinalizes(repo):
 
     assert updated.is_final is False
     assert [c.id for c in updated.criteria] == ["python", "postgresql"]
-    # c2 lacks an eval for the surviving 'postgresql' criterion.
     assert requeued == ["c2"]
     c2 = await repo.get_candidate_result("c2")
     assert c2.status == CandidateStatus.QUEUED
     assert c2.total_score is None
-    # c1 kept full coverage: removed criterion's eval row is gone and
-    # the total was recomputed from the remaining evals (5*1 + 3*1)/8.
     c1 = await repo.get_candidate_result("c1")
     assert c1.status == CandidateStatus.COMPLETE
     assert [e.criterion_id for e in c1.evaluations] == [
@@ -544,7 +531,6 @@ async def test_criteria_patch_prunes_evals_requeues_and_unfinalizes(repo):
 
 
 async def test_update_manual_evaluation_no_row_still_commits(repo):
-    # rowcount == 0 early return must still close the transaction.
     result = await repo.update_manual_evaluation(
         "ghost", "python", 0.5, None, "tester"
     )

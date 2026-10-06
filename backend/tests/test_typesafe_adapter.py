@@ -42,8 +42,6 @@ def noul_answer(probability):
 
 
 class FakeClient:
-    """Records calls and returns canned answers keyed by question id."""
-
     def __init__(self, scores=None, choices=None, nouls=None, error=None):
         self.scores = scores or {}
         self.choices = choices or {}

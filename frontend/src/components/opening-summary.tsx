@@ -19,14 +19,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 
-/**
- * Single quiet line above the scorecard: title, a clickable status badge,
- * meta. Full opening details live in the Edit opening dialog — the page
- * stays focused on candidates. Monochrome per PRODUCT.md — status is
- * icon + text.
- */
-
-// Keyed by string so the map stays valid as OpeningStatus grows.
 const STATUS_META: Record<
   string,
   { icon: typeof CircleIcon; label: string }
@@ -49,8 +41,6 @@ function statusMeta(status: OpeningStatus) {
 }
 
 function formatClosesAt(closesAt: string): string {
-  // Payload may be date-only or a full ISO datetime — normalize to the
-  // calendar date, pinned to local midday so timezones can't shift the day.
   const date = new Date(`${closesAt.slice(0, 10)}T12:00:00`)
   if (Number.isNaN(date.getTime())) return closesAt
   return date.toLocaleDateString("en-US", {

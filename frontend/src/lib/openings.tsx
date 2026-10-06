@@ -21,7 +21,6 @@ import type {
   WorkArrangement,
 } from "@/types"
 
-/** Domain opening plus view-only fields used by the sidebar and cards. */
 export interface Opening extends OpeningModel {
   url: string
   icon?: ReactNode
@@ -83,8 +82,6 @@ export interface NewOpeningInput {
   icon?: ReactNode
   criteria?: NewCriterionInput[]
 }
-
-// ---------- store ----------
 
 let openings: Opening[] = []
 let loaded = false
@@ -167,10 +164,6 @@ export async function refreshOpenings(): Promise<void> {
 const REFRESH_DEBOUNCE_MS = 500
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
 
-/**
- * Trailing-debounced refresh for SSE bursts — a batch of server events
- * collapses into a single list refetch once events stop arriving.
- */
 export function refreshOpeningsSoon(): void {
   if (refreshTimer) clearTimeout(refreshTimer)
   refreshTimer = setTimeout(() => {
@@ -212,8 +205,6 @@ function buildCriteria(input: NewOpeningInput["criteria"]) {
     })
 }
 
-// A stated minimum counts as covered only when a criterion names a
-// concrete span/level — a generic "experience" row does not encode it.
 const YEARS_RE = /\d+\s*[-–+]?\s*\d*\s*(?:years?|yrs?|tahun)/i
 const EDU_RE =
   /bachelor|master|diploma|degree|doctor|phd|mba|s[123]\b|d[1-4]\b|sarjana|magister/i
@@ -233,8 +224,6 @@ function coveredByCriteria(
 }
 
 function toPayload(input: NewOpeningInput): NewOpeningPayload {
-  // Stated minimums become concrete, weightable criteria when no
-  // criterion already covers them (mirrors the importer's backstop).
   const criteriaInput = [...(input.criteria ?? [])]
   const experience = input.experienceLevel?.trim()
   if (experience && !coveredByCriteria(criteriaInput, YEARS_RE, experience)) {
@@ -302,12 +291,6 @@ export async function setOpeningArchived(
   await setOpeningStatus(id, archived ? "archived" : "open")
 }
 
-// ---------- skill -> criteria suggestions ----------
-
-/**
- * Merge Jev skill suggestions into the form's criteria list — appends new
- * criteria for skills that matched nothing, skipping names already present.
- */
 export function mergeSuggestions(
   criteria: NewCriterionInput[],
   suggestions: SkillSuggestion[],
@@ -329,7 +312,6 @@ export function mergeSuggestions(
   return additions.length ? [...criteria, ...additions] : criteria
 }
 
-/** Test hook — clears the cache between tests. */
 export function __resetOpeningsForTests() {
   openings = []
   loaded = false

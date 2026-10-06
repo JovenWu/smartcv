@@ -11,11 +11,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 
-/**
- * Small shared confirmation step for destructive or reversible-but-notable
- * record actions (archive, delete). `onConfirm` may be async — buttons stay
- * disabled while it runs and failures surface inline instead of closing.
- */
 export function ConfirmDialog({
   open,
   onOpenChange,
@@ -54,8 +49,6 @@ export function ConfirmDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      {/* aria-describedby silences the missing-description warning when
-          no description prop is provided. */}
       <DialogContent aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>

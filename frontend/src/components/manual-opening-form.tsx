@@ -30,8 +30,6 @@ import {
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 
-/** Editable criterion plus a stable row id — index keys break row state
- * when earlier rows are removed mid-edit. */
 interface CriterionRow extends NewCriterionInput {
   rowId: number
 }
@@ -43,9 +41,7 @@ export function ManualOpeningForm({
   submitLabel = "Create opening",
 }: {
   onDone: () => void
-  /** Pre-filled draft, e.g. fields extracted from an imported listing. */
   initial?: Partial<NewOpeningInput>
-  /** Where the entered data goes — addOpening by default, updateOpening when editing. */
   onSubmit?: (input: NewOpeningInput) => void | Promise<unknown>
   submitLabel?: string
 }) {
@@ -79,8 +75,6 @@ export function ManualOpeningForm({
       prev.map((c, i) => (i === index ? { ...c, ...patch } : c)),
     )
 
-  // Debounced Jev classification: pause typing 600ms → classify new skills
-  // against the filled role context and append suggested criteria.
   const suggestedRef = useRef<Set<string>>(
     new Set(
       [
@@ -142,8 +136,6 @@ export function ManualOpeningForm({
           if (!fresh.length) return
           setCriteria((prev) => {
             const merged = mergeSuggestions(prev, fresh)
-            // mergeSuggestions only appends — existing rows keep their
-            // rowId, new suggestions get fresh ones.
             return merged.map((c, i) =>
               i < prev.length
                 ? prev[i]
@@ -152,11 +144,9 @@ export function ManualOpeningForm({
           })
         })
         .catch(() => {
-          // Suggestions are best-effort — typing must never block on Jev.
         })
     }, 600)
     return () => clearTimeout(timer)
-    // Suggestion context is read from refs so a paused keystroke fires once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [skills])
 

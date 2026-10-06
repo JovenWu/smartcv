@@ -11,7 +11,6 @@ FROM python:3.13-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# LibreOffice provides `soffice` for DOCX -> PDF normalization.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libreoffice-writer \
@@ -29,7 +28,6 @@ COPY backend ./backend
 COPY pytest.ini ./pytest.ini
 COPY --from=frontend-build /build/dist ./frontend/dist
 
-# Runtime files live under /app/backend/data (mount a volume to persist).
 ENV SMARTCV_FAKE_EVALUATOR=false \
     TYPESAFE_MODEL=jev-latest
 

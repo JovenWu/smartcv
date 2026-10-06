@@ -92,8 +92,6 @@ export function NewOpeningDialog({
     onOpenChange(next)
   }
 
-  // The form's onDone carries no payload — stash the created opening so
-  // we can land on its detail page instead of back at the list.
   const createOpening = async (input: NewOpeningInput) => {
     createdRef.current = await addOpening(input)
   }

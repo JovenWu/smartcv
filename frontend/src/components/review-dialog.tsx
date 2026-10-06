@@ -136,11 +136,6 @@ function ReviewDialogContent({
   )
 }
 
-/**
- * Recruiter override for a needs_review cell: pick a match level and an
- * optional note; reviewCriterion PATCHes the evaluation to "reviewed".
- * The content remounts per target (keyed), so fields always start clean.
- */
 export function ReviewDialog({
   opening,
   target,

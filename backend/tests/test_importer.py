@@ -73,8 +73,6 @@ def make_settings(**overrides):
         "_env_file": None,
         "openrouter_api_key": "k",
         "tavily_api_key": "k",
-        # Real browser launches stay out of unit tests; the browser tier
-        # is exercised via a stubbed _fetch_browser.
         "import_browser_enabled": False,
     }
     base.update(overrides)
@@ -101,12 +99,12 @@ async def test_link_import_happy_path():
     assert draft.employment_type == "full_time"
     assert draft.work_arrangement == "hybrid"
     assert draft.closes_at == "2026-10-15"
-    assert draft.criteria[0].suggested_weight == 3  # FakeEvaluator
+    assert draft.criteria[0].suggested_weight == 3
     assert draft.criteria[0].weight == 3
     assert draft.criteria[0].required is True
     assert draft.source.type == "link"
     assert draft.source.url == "https://jobstreet.example/job/1"
-    assert not any("tavily" in c for c in calls)  # thick page → no search
+    assert not any("tavily" in c for c in calls)
     await client.aclose()
 
 
@@ -196,7 +194,6 @@ def test_search_page_url_canonicalized():
     assert _canonical_listing_url(
         "https://id.jobstreet.com/frontend-jobs?pos=1&jobId=94625401&type=standard"
     ) == "https://id.jobstreet.com/job/94625401"
-    # Detail links and other hosts pass through untouched.
     assert _canonical_listing_url(
         "https://id.jobstreet.com/job/94625401"
     ) == "https://id.jobstreet.com/job/94625401"
@@ -206,9 +203,6 @@ def test_search_page_url_canonicalized():
 
 
 async def test_experience_level_becomes_a_criterion():
-    """A stated minimum ('3-5 years') must survive into criteria, not
-    live only in the experienceLevel field."""
-
     def handler(request):
         if "openrouter" in str(request.url):
             return openrouter_response(
@@ -238,7 +232,6 @@ async def test_experience_level_becomes_a_criterion():
     names = [c.name for c in draft.criteria]
     assert "Experience: 3-5 years" in names
     assert "Education: Bachelor's degree" in names
-    # The appended criteria are weighted like the rest.
     exp = next(c for c in draft.criteria if c.name.startswith("Experience"))
     assert exp.required is True
     assert exp.suggested_weight == 3
@@ -384,7 +377,6 @@ async def test_file_import_sends_binary_part(tmp_path):
 
 async def test_image_import_sends_image_part(tmp_path):
     source = tmp_path / "ad.png"
-    # 1x1 PNG
     source.write_bytes(
         bytes.fromhex(
             "89504e470d0a1a0a0000000d494844520000000100000001080600"
@@ -457,9 +449,6 @@ async def test_redirect_to_private_host_is_rejected():
 
 
 async def test_hostname_resolving_private_is_rejected(monkeypatch):
-    """A public-looking hostname that resolves to a link-local/metadata
-    address must fail the SSRF check even though the literal is clean."""
-
     def fake_getaddrinfo(host, port, *args, **kwargs):
         return _addrinfo("169.254.169.254")
 
@@ -480,8 +469,6 @@ async def test_hostname_resolving_private_is_rejected(monkeypatch):
 
 
 async def test_mixed_resolution_with_private_is_rejected(monkeypatch):
-    """ANY non-public address in the resolver answer is enough."""
-
     def fake_getaddrinfo(host, port, *args, **kwargs):
         return _addrinfo("93.184.216.34", "10.0.0.7")
 
@@ -502,8 +489,6 @@ async def test_mixed_resolution_with_private_is_rejected(monkeypatch):
 
 
 async def test_unresolvable_hostname_is_rejected(monkeypatch):
-    """DNS failure fails closed."""
-
     def fake_getaddrinfo(host, port, *args, **kwargs):
         raise socket.gaierror(-2, "Name or service not known")
 
@@ -529,8 +514,6 @@ class _FakeRequest:
 
 
 class _FakeRoute:
-    """Minimal stand-in for a playwright Route."""
-
     def __init__(self, url):
         self.request = _FakeRequest(url)
         self.aborted = False
@@ -544,8 +527,6 @@ class _FakeRoute:
 
 
 async def test_browser_route_aborts_private_redirect_target():
-    """The route guard covers redirect hops: a navigation landing on a
-    private literal is aborted before any bytes flow."""
     route = _FakeRoute("http://169.254.169.254/latest/meta-data")
     await importer_module._guard_browser_route(route, {})
     assert route.aborted is True

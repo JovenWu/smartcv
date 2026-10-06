@@ -63,8 +63,6 @@ function NavOpeningItem({ item, active }: { item: Opening; active: boolean }) {
         <TooltipContent side="right">{item.title}</TooltipContent>
       </Tooltip>
       {item.pendingReview > 0 && (
-        // Badge occupies the meatball's slot; it fades out on hover,
-        // focus, or while its dropdown is open — the action fades in.
         <SidebarMenuBadge className="right-1 rounded-full bg-primary text-primary-foreground transition-opacity group-focus-within/menu-item:opacity-0 group-hover/menu-item:opacity-0 group-has-[[aria-expanded=true]]/menu-item:opacity-0">
           {item.pendingReview}
         </SidebarMenuBadge>
@@ -117,7 +115,6 @@ export function NavOpenings({ items }: { items: Opening[] }) {
   const location = useLocation()
   const status = useOpeningsStatus()
   const [newOpeningOpen, setNewOpeningOpen] = useState(false)
-  // Archived openings never appear in the sidebar.
   const visible = items.filter((item) => item.status !== "archived")
 
   return (

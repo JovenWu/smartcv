@@ -84,8 +84,6 @@ def make_pool(
 
 
 class FlaggingEvaluator:
-    """Marks every criterion needs_review so the reviewer can step in."""
-
     async def evaluate_candidate(self, criteria, spans, opening=None):
         return [
             CriterionEvaluation(
@@ -488,7 +486,6 @@ async def test_reviewer_failure_keeps_review_status(
 async def test_discard_pending_skips_queued_candidate(
     repository, opening, tmp_path
 ):
-    """A deleted candidate still sitting in the queue is never processed."""
     candidate_id = await add_candidate(
         repository, opening, tmp_path, text="Python PostgreSQL"
     )
@@ -502,7 +499,6 @@ async def test_discard_pending_skips_queued_candidate(
 
     pool.process_candidate = spy
     pool.enqueue(candidate_id)
-    # Delete endpoint flow: row gone first, then drop the queued item.
     await repository.delete_candidate(candidate_id)
     pool.discard_pending(candidate_id)
     await pool.start()
@@ -510,7 +506,7 @@ async def test_discard_pending_skips_queued_candidate(
         deadline = time.time() + 5
         while time.time() < deadline and not pool._queue.empty():
             await asyncio.sleep(0.05)
-        await asyncio.sleep(0.1)  # let the drained entry be handled
+        await asyncio.sleep(0.1)
         assert processed == []
         assert candidate_id not in pool._pending
     finally:
@@ -530,13 +526,12 @@ async def test_discard_pending_unknown_id_is_noop(repository, tmp_path):
 async def test_process_deleted_candidate_is_noop(
     repository, opening, tmp_path
 ):
-    """In-flight candidates for deleted rows exit via get_candidate None."""
     candidate_id = await add_candidate(
         repository, opening, tmp_path, text="Python PostgreSQL"
     )
     await repository.delete_candidate(candidate_id)
     pool = make_pool(repository, tmp_path)
-    await pool.process_candidate(candidate_id)  # returns silently
+    await pool.process_candidate(candidate_id)
     assert await repository.get_candidate_result(candidate_id) is None
 
 

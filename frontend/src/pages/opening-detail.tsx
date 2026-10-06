@@ -207,12 +207,6 @@ function ScoreCell({ candidate }: { candidate: Candidate }) {
 
 const SKELETON_ROWS = Array.from({ length: 6 }, (_, i) => i)
 
-/**
- * Table-shaped placeholder with the same chrome/geometry as the real
- * scorecard, so rows slide in without a layout jump. Criterion headers
- * are passed in when the opening is already loaded; otherwise generic
- * bars stand in for them.
- */
 function ScorecardSkeleton({ columns }: { columns?: string[] }) {
   const cols = columns ?? ["", "", ""]
   return (
@@ -272,8 +266,6 @@ function ScorecardSkeleton({ columns }: { columns?: string[] }) {
   )
 }
 
-/** Full-page wait: mirrors the delivered layout (summary, toolbar,
-    scorecard) instead of a lone spinner. */
 function OpeningSkeleton() {
   return (
     <div
@@ -370,8 +362,6 @@ function CandidateSection({
   )
   const prevStatuses = useRef(new Map<string, Candidate["status"]>())
   const liveRef = useRef<HTMLParagraphElement>(null)
-  // Only the outer wrapper keeps auto-animate — animating <tr> elements
-  // breaks the sticky pinned cells and repaints rows over the header.
   const [bodyRef] = useAutoAnimate<HTMLDivElement>({
     duration: 200,
     easing: "cubic-bezier(0.25, 1, 0.5, 1)",
@@ -385,15 +375,11 @@ function CandidateSection({
     IN_FLIGHT.has(c.status),
   ).length
 
-  // The raw selection may hold ids of rows deleted meanwhile — the live
-  // view intersects it with the current list, no pruning effect needed.
   const liveSelection = useMemo(() => {
     const alive = new Set(candidates.map((c) => c.id))
     return new Set([...selectedIds].filter((cid) => alive.has(cid)))
   }, [candidates, selectedIds])
 
-  // Screen-reader narration: progress plus candidates that just finished.
-  // Written imperatively — a live region's DOM text IS the target system.
   useEffect(() => {
     const prev = prevStatuses.current
     const justFinished: string[] = []
@@ -481,8 +467,6 @@ function CandidateSection({
     }
   }
 
-  // Runs inside ConfirmDialog — it awaits, keeps the dialog open on throw
-  // and shows the error inline, and closes itself on success.
   const deleteCandidate = async (candidate: Candidate) => {
     setActionError(null)
     await removeCandidate(opening.id, candidate.id)
@@ -517,7 +501,6 @@ function CandidateSection({
     }
   }
 
-  // ConfirmDialog awaits this — a throw keeps it open with the error shown.
   const bulkDelete = async () => {
     const ids = [...liveSelection]
     if (!ids.length || bulkBusy) return
@@ -898,10 +881,6 @@ export default function OpeningDetailPage() {
   const opening = useOpenings().find((o) => o.id === id)
   const [nonce, setNonce] = useState(0)
 
-  // opening.deleted: when an opening we were viewing disappears from a
-  // ready openings store (SSE clears candidates + refresh drops the row),
-  // return to the list. The layout effect navigates before paint, so the
-  // not-found state never flashes on a deletion.
   const presentRef = useRef<string | null>(null)
   useEffect(() => {
     if (opening) presentRef.current = opening.id

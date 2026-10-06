@@ -20,10 +20,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 
-/**
- * Per-row overflow menu: open the CV, inspect evidence, jump into a
- * needs_review criterion, or delete the candidate (parent confirms).
- */
 export function CandidateRowMenu({
   opening,
   candidate,

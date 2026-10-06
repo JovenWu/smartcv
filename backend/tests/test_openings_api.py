@@ -155,7 +155,5 @@ def test_delete_opening_cascades_rows_and_files(client, settings):
     assert client.delete(f"/api/openings/{oid}").status_code == 404
     listed = client.get("/api/openings").json()
     assert all(o["id"] != oid for o in listed)
-    # Stored CV files are gone as well.
     assert list(settings.uploads_dir.iterdir()) == []
-    # Events for a deleted opening no longer stream.
     assert client.get(f"/api/openings/{oid}/events").status_code == 404

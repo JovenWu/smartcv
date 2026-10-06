@@ -11,7 +11,6 @@ async function parseError(response: Response): Promise<Error> {
     const body = (await response.json()) as { detail?: unknown }
     if (typeof body.detail === "string") detail = body.detail
   } catch {
-    // Non-JSON body — keep the status-based message.
   }
   return new Error(detail)
 }
@@ -21,11 +20,6 @@ export async function getSession(): Promise<SessionInfo> {
   if (!response.ok) throw await parseError(response)
   return (await response.json()) as SessionInfo
 }
-
-// ---------- session store ----------
-// Module-level cache so every useSession() consumer shares one fetch and
-// one snapshot. refreshSession() revalidates after login/logout; apiFetch
-// calls clearSession() when a request comes back 401.
 
 const UNAUTHENTICATED: SessionInfo = {
   auth_required: true,
@@ -81,7 +75,6 @@ export function refreshSession(): Promise<SessionInfo> {
   return inflight
 }
 
-/** Mark the session signed-out locally (401 handling, logout). */
 export function clearSession(): void {
   session = UNAUTHENTICATED
   loaded = true
@@ -98,8 +91,6 @@ export async function login(
     body: JSON.stringify({ username, password }),
   })
   if (!response.ok) throw await parseError(response)
-  // The session cookie just changed — refresh so guards see the new state
-  // before the caller navigates.
   await refreshSession()
 }
 
@@ -124,7 +115,6 @@ export async function changePassword(
   if (!response.ok) throw await parseError(response)
 }
 
-/** Test hook — clears the cached session between tests. */
 export function __resetSessionForTests() {
   session = null
   loaded = false

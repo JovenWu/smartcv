@@ -76,8 +76,6 @@ async def update_user(
 ) -> UserInfo:
     if body.is_active is None and body.is_admin is None:
         raise HTTPException(400, "No fields to update")
-    # Self-protection: an acting admin is always an active admin, so
-    # blocking self-disable / self-demote guarantees >= 1 active admin.
     if user_id == admin.id:
         if body.is_active is False:
             raise HTTPException(
@@ -94,8 +92,6 @@ async def update_user(
     if user is None:
         raise HTTPException(404, "No such user")
     if body.is_active is False:
-        # Disabled users must be locked out immediately — their session
-        # cookies would otherwise keep working until expiry.
         await repository.delete_user_sessions(user_id)
     return user
 
@@ -111,6 +107,4 @@ async def reset_password(
     digest = await asyncio.to_thread(hash_password, body.password)
     if not await repository.set_user_password(user_id, digest):
         raise HTTPException(404, "No such user")
-    # Force re-login everywhere: the old password's sessions are no
-    # longer trustworthy once an admin rotates credentials.
     await repository.delete_user_sessions(user_id)

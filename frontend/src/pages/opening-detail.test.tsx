@@ -7,7 +7,6 @@ import type { CvViewer } from "@/components/cv-viewer-context"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import type { Candidate, Opening } from "@/types"
 
-// jsdom lacks pointer-capture/scroll APIs Radix menus rely on.
 for (const key of ["hasPointerCapture", "releasePointerCapture"]) {
   if (!Element.prototype[key as keyof Element])
     Object.assign(Element.prototype, { [key]: () => false })
@@ -184,7 +183,6 @@ describe("OpeningDetailPage", () => {
     expect(
       screen.getByRole("button", { name: "See CV for Jane Doe" }),
     ).toBeInTheDocument()
-    // screening announcements live in a polite status region
     expect(document.querySelector('[aria-live="polite"]')).not.toBeNull()
   })
 

@@ -9,10 +9,6 @@ import {
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 
-/**
- * Floating pill shown at the bottom of the scorecard while ≥1 candidate is
- * selected. Quiet, muted, monochrome per PRODUCT.md.
- */
 export function BulkActionsBar({
   count,
   busy,
@@ -29,8 +25,6 @@ export function BulkActionsBar({
   onClear: () => void
 }) {
   if (count === 0) return null
-  // Fixed, viewport-centred: the sidebar offsets the content area, so
-  // centring inside the table wrapper looked off-centre on the page.
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-4 z-30 flex justify-center px-4">
       <div

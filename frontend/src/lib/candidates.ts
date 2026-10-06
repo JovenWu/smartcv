@@ -13,22 +13,12 @@ import type {
   CandidateStatus,
 } from "@/types"
 
-/**
- * Per-opening candidate cache fed by GET + SSE. Each opening id keeps its
- * own list and one EventSource; the stream lives as long as at least one
- * hook subscriber is mounted. Detach keeps the last list so a remount can
- * revalidate silently instead of flashing the empty state.
- */
 interface CacheEntry {
   list: Candidate[]
   refs: number
-  /** True once a GET has resolved; reset on detach so remount revalidates. */
   loaded: boolean
-  /** Initial GET failed — surfaced as "error" via useCandidatesStatus. */
   error: boolean
-  /** opening.deleted arrived — terminal; no refetch or stream reconnect. */
   deleted: boolean
-  /** GET in flight — dedupes concurrent attaches and SSE refetches. */
   fetching: boolean
   events?: EventSource
 }
@@ -68,7 +58,6 @@ export const IN_FLIGHT_STATUSES: ReadonlySet<CandidateStatus> = new Set([
   "evaluating",
 ])
 
-// Decision sort order: shortlisted outranks undecided, rejected sinks.
 const DECISION_RANK: Record<CandidateDecision, number> = {
   passed: 0,
   undecided: 1,
@@ -93,8 +82,6 @@ export function sortCandidates(
   list: Candidate[],
   sort: CandidateSort,
 ): Candidate[] {
-  // Missing values (unscored, no evaluation) always sink to the bottom,
-  // whichever direction. uploadOrder breaks ties so rows never jitter.
   const sign = sort.dir === "asc" ? 1 : -1
   return [...list].sort((a, b) => {
     const av = sortValue(a, sort.column)
@@ -147,10 +134,6 @@ function upsert(openingId: string, candidate: Candidate) {
   emit()
 }
 
-/**
- * GET the candidate list once. Skipped when a fetch is already in flight
- * or the opening was deleted; failures surface via useCandidatesStatus.
- */
 function fetchList(openingId: string) {
   const entry = entryFor(openingId)
   if (entry.fetching || entry.deleted) return
@@ -158,7 +141,6 @@ function fetchList(openingId: string) {
   void candidatesApi
     .list(openingId)
     .then((list) => {
-      // opening.deleted may have landed while this GET was in flight.
       if (entry.deleted) return
       entry.loaded = true
       entry.error = false
@@ -182,8 +164,6 @@ function onEvent(openingId: string, event: string, data: unknown) {
       const candidates = payload.candidates as Candidate[] | undefined
       if (candidates) setList(openingId, candidates)
       refreshOpeningsSoon()
-      // Terminal stream — EventSource would otherwise auto-reconnect and
-      // the server would replay the snapshot in a poll loop.
       const opening = payload.opening as { isFinal?: boolean } | undefined
       if (event === "opening.complete" || opening?.isFinal) {
         caches.get(openingId)?.events?.close()
@@ -207,8 +187,6 @@ function onEvent(openingId: string, event: string, data: unknown) {
       break
     }
     case "candidates.updated":
-      // Bulk change — refetch this opening's list once instead of
-      // applying one event per row.
       fetchList(openingId)
       break
     case "opening.deleted": {
@@ -252,12 +230,10 @@ function ensureStream(openingId: string) {
       try {
         onEvent(openingId, name, JSON.parse(e.data))
       } catch {
-        // Malformed payload — drop the event, keep the stream.
       }
     })
   }
   events.onerror = () => {
-    // The server closes the stream after opening.complete — that's normal.
   }
   entry.events = events
 }
@@ -266,8 +242,6 @@ function attach(openingId: string) {
   const entry = entryFor(openingId)
   if (entry.deleted) return
   ensureStream(openingId)
-  // Detach keeps the cached list but marks it stale; reattach revalidates
-  // silently and swaps the fresh list in when it lands.
   if (!entry.loaded) fetchList(openingId)
 }
 
@@ -301,8 +275,6 @@ function subscribe(openingId: string | undefined) {
 const EMPTY: Candidate[] = []
 
 export function useCandidates(openingId: string | undefined): Candidate[] {
-  // Stable subscribe fn per opening id — useSyncExternalStore resubscribes
-  // when it changes identity.
   const subscribeFor = useMemo(() => subscribe(openingId), [openingId])
   return useSyncExternalStore(subscribeFor, () =>
     openingId ? (caches.get(openingId)?.list ?? EMPTY) : EMPTY,
@@ -358,8 +330,6 @@ export async function addCandidates(
   )
   response.candidates.forEach((candidate) => upsert(openingId, candidate))
   response.duplicates.forEach((candidate) => upsert(openingId, candidate))
-  // If a previous batch closed the stream via opening.complete, reopen it
-  // so the new uploads stream their updates live.
   ensureStream(openingId)
   await refreshOpenings()
   return response
@@ -395,11 +365,6 @@ export async function setDecision(
   return updated
 }
 
-/**
- * Apply one decision to many candidates. The backend publishes a single
- * candidates.updated event, but refetch here too so callers that detached
- * the stream still converge.
- */
 export async function bulkSetDecision(
   openingId: string,
   candidateIds: string[],
@@ -419,7 +384,6 @@ export async function removeCandidate(
   candidateId: string,
 ): Promise<void> {
   await candidatesApi.remove(openingId, candidateId)
-  // Drop the row now — the SSE candidate.deleted event is idempotent.
   const entry = caches.get(openingId)
   if (entry) {
     entry.list = entry.list.filter((c) => c.id !== candidateId)
@@ -438,7 +402,6 @@ export async function retryCandidate(
   return updated
 }
 
-/** Test hook — clears caches and closes any open streams. */
 export function __resetCandidatesForTests() {
   for (const entry of caches.values()) entry.events?.close()
   caches.clear()

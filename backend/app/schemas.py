@@ -107,7 +107,6 @@ class Opening(ApiModel):
     updated_at: datetime | None = None
     candidates: int = Field(default=0, ge=0)
     pending_review: int = Field(default=0, ge=0)
-    # True once every candidate reached a terminal state.
     is_final: bool = False
 
 
@@ -234,9 +233,6 @@ class DecisionUpdate(ApiModel):
     decision: CandidateDecision
 
 
-# ---------- Listing import ----------
-
-
 class ImportLinkRequest(ApiModel):
     url: str = Field(min_length=1)
 
@@ -264,9 +260,6 @@ class ImportDraft(ApiModel):
     criteria: list[ImportCriterion] = []
     source: OpeningSource
     warnings: list[str] = []
-
-
-# ---------- Skill -> criteria suggestions ----------
 
 
 class CriterionRef(ApiModel):

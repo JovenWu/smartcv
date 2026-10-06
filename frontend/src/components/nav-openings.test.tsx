@@ -24,7 +24,6 @@ vi.mock("@/lib/openings", async (importActual) => {
 })
 
 beforeAll(() => {
-  // jsdom lacks the pointer APIs Radix menus reach for.
   Object.assign(window.HTMLElement.prototype, {
     hasPointerCapture: () => false,
     setPointerCapture: () => {},

@@ -63,8 +63,6 @@ describe("FileDropzone", () => {
 
   it("keeps the highlight while the pointer is still inside the zone", () => {
     const { label } = renderZone()
-    // Nested dragenter (from a child) must not cancel the highlight —
-    // the depth counter only releases on the final dragleave.
     fireEvent.dragEnter(label)
     fireEvent.dragEnter(label)
     fireEvent.dragLeave(label)

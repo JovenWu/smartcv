@@ -137,9 +137,7 @@ describe("useCandidates", () => {
     vi.stubGlobal("EventSource", FakeEventSource)
     const { result } = renderHook(() => useCandidates("o1"))
     await waitFor(() => expect(result.current).toHaveLength(3))
-    // Highest score first; unscored last.
     expect(result.current.map((c) => c.id)).toEqual(["mid", "low", "queued"])
-    // A completed evaluation overtakes lower scores.
     act(() => {
       FakeEventSource.instances[0].dispatch("candidate.updated", {
         candidate: { ...queued, status: "complete", totalScore: 95 },
@@ -290,13 +288,11 @@ describe("sortCandidates", () => {
       }),
       scored("none", 0, 2),
     ]
-    // manualFraction (1.0) beats modelFraction (0.5); missing sinks.
     expect(
       sortCandidates(list, { column: "python", dir: "desc" }).map(
         (c) => c.id,
       ),
     ).toEqual(["reviewed", "weak", "none"])
-    // Missing values sink even ascending.
     expect(
       sortCandidates(list, { column: "python", dir: "asc" }).map(
         (c) => c.id,
@@ -354,7 +350,6 @@ describe("orderCandidates", () => {
         (c) => c.id,
       ),
     ).toEqual(["new", "low"])
-    // Score ascending follows sort rules: unscored still sink.
     expect(
       orderCandidates(list, { column: "score", dir: "asc" }).map(
         (c) => c.id,
@@ -509,7 +504,6 @@ describe("candidate store SSE events", () => {
     expect(es.closed).toBe(true)
     expect(result.current.list).toHaveLength(0)
     expect(result.current.status).toBe("error")
-    // Terminal — no reconnect, no refetch.
     await act(async () => {})
     expect(FakeEventSource.instances).toHaveLength(1)
   })
@@ -588,7 +582,6 @@ describe("useCandidates remount", () => {
     await waitFor(() => expect(first.result.current).toHaveLength(1))
     first.unmount()
 
-    // Second mount: the refetch hangs, but the stale list stays rendered.
     let resolveList!: (response: Response) => void
     fetchMock.mockImplementation((input: RequestInfo | URL) =>
       String(input).endsWith("/candidates")

@@ -84,7 +84,6 @@ describe("apiFetch", () => {
           }),
         ),
     )
-    // jsdom's location.assign is non-configurable — stub the whole object.
     const assign = vi.fn()
     vi.stubGlobal("location", { pathname: "/", assign })
     await refreshSession()
