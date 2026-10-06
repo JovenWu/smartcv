@@ -1,8 +1,11 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from backend.app.api import router as api_router
 from backend.app.auth import SessionStore, auth_router
@@ -30,7 +33,13 @@ def create_app(
     reviewer=None,
 ) -> FastAPI:
     settings = settings or get_settings()
-    app = FastAPI(title="SmartCV")
+    api_docs = settings.smartcv_api_docs
+    app = FastAPI(
+        title="SmartCV",
+        docs_url="/docs" if api_docs else None,
+        redoc_url="/redoc" if api_docs else None,
+        openapi_url="/openapi.json" if api_docs else None,
+    )
     app.state.settings = settings
     app.state.evaluator_override = evaluator
     app.state.importer_override = importer
@@ -116,6 +125,33 @@ def create_app(
 
     app.include_router(auth_router)
     app.include_router(api_router)
+
+    # Serve the built SPA when frontend/dist exists (single-container
+    # deployment). /api routes are registered above and win; unknown /api
+    # paths must stay JSON 404s, not fall back to index.html.
+    frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    if frontend_dist.is_dir():
+        assets_dir = frontend_dist / "assets"
+        if assets_dir.is_dir():
+            app.mount(
+                "/assets",
+                StaticFiles(directory=assets_dir),
+                name="assets",
+            )
+
+        @app.get("/{path:path}", include_in_schema=False)
+        async def spa_fallback(path: str):
+            if path.startswith("api/"):
+                raise HTTPException(status_code=404)
+            candidate = (frontend_dist / path).resolve()
+            if (
+                path
+                and candidate.is_file()
+                and candidate.is_relative_to(frontend_dist.resolve())
+            ):
+                return FileResponse(candidate)
+            return FileResponse(frontend_dist / "index.html")
+
     return app
 
 

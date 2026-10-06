@@ -20,7 +20,6 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { useOpenings } from "@/lib/openings"
-import { FileSearchIcon } from "lucide-react"
 
 const data = {
   user: {
@@ -44,9 +43,11 @@ export function AppSidebar({
               <TooltipTrigger asChild>
                 <SidebarMenuButton size="lg" asChild>
                   <Link to="/">
-                    <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                      <FileSearchIcon className="size-4" />
-                    </div>
+                    <img
+                      src="/app-icon-v2.png"
+                      alt=""
+                      className="size-8 rounded-lg"
+                    />
                     <div className="grid flex-1 text-left text-sm leading-tight">
                       <span className="truncate font-medium">SmartCV</span>
                       <span className="truncate text-xs">Screening</span>

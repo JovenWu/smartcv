@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # JSON map of username -> password, e.g. {"recruiter": "s3cret"}.
     # Empty disables the demo gate entirely.
     smartcv_accounts: str = ""
+    # Expose /docs, /redoc and /openapi.json. Off by default — enable
+    # only for local development, never on a public deployment.
+    smartcv_api_docs: bool = False
     max_batch_files: int = 200
     max_file_bytes: int = 10_000_000
     worker_count: int = Field(default=4, ge=1)

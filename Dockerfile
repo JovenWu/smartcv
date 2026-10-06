@@ -1,3 +1,11 @@
+FROM node:22-bookworm-slim AS frontend-build
+
+WORKDIR /build
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --legacy-peer-deps
+COPY frontend ./
+RUN npm run build
+
 FROM python:3.13-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -19,6 +27,7 @@ RUN pip install --no-cache-dir -r backend/requirements.txt \
 
 COPY backend ./backend
 COPY pytest.ini ./pytest.ini
+COPY --from=frontend-build /build/dist ./frontend/dist
 
 # Runtime files live under /app/backend/data (mount a volume to persist).
 ENV SMARTCV_FAKE_EVALUATOR=false \

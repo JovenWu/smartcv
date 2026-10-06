@@ -2,7 +2,8 @@ services:
   backend:
     build: .
     ports:
-      - "127.0.0.1:8000:8000"
+      # Host port 8000 is taken by another project on this machine.
+      - "127.0.0.1:8001:8000"
     # backend/.env is the single source of configuration; copy
     # .env.example and fill it in. Do not re-add an `environment:` block:
     # compose interpolates it from ./.env and would override these values
