@@ -187,6 +187,33 @@ export interface CriterionReview {
   reviewNote?: string
 }
 
+// ---------- admin user management ----------
+
+export interface UserInfo {
+  id: string
+  username: string
+  isAdmin: boolean
+  isActive: boolean
+  createdAt: string
+}
+
+export const usersApi = {
+  list: () => apiFetch<UserInfo[]>("/api/admin/users"),
+  create: (input: {
+    username: string
+    password: string
+    isAdmin?: boolean
+  }) => jsonPost<UserInfo>("/api/admin/users", input),
+  update: (id: string, input: { isActive?: boolean; isAdmin?: boolean }) =>
+    apiFetch<UserInfo>(`/api/admin/users/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  resetPassword: (id: string, password: string) =>
+    jsonPost<void>(`/api/admin/users/${id}/reset-password`, { password }),
+}
+
 export const candidatesApi = {
   list: (openingId: string) =>
     apiFetch<Candidate[]>(`/api/openings/${openingId}/candidates`),

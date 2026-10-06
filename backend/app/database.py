@@ -2,6 +2,9 @@ import asyncio
 import hashlib
 import json
 import re
+import secrets
+import time
+import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -28,6 +31,7 @@ from backend.app.schemas import (
     OpeningStatus,
     OpeningUpdate,
     SourceType,
+    UserInfo,
     WorkArrangement,
 )
 
@@ -121,6 +125,23 @@ CREATE TABLE IF NOT EXISTS evaluations (
     PRIMARY KEY (candidate_id, criterion_id)
 );
 """
+_USERS_DDL = """
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+"""
+_SESSIONS_DDL = """
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL
+);
+"""
 
 _SCHEMA = "\n".join(
     (
@@ -129,6 +150,8 @@ _SCHEMA = "\n".join(
         _CANDIDATES_DDL,
         _EVIDENCE_SPANS_DDL,
         _EVALUATIONS_DDL,
+        _USERS_DDL,
+        _SESSIONS_DDL,
     )
 )
 
@@ -1372,3 +1395,226 @@ class SQLiteRepository:
             )
             await self.db.commit()
             return cursor.rowcount == 1
+
+    # ---------- users & sessions ----------
+
+    @staticmethod
+    def _user_from_row(row: aiosqlite.Row) -> UserInfo:
+        return UserInfo(
+            id=row["id"],
+            username=row["username"],
+            is_admin=bool(row["is_admin"]),
+            is_active=bool(row["is_active"]),
+            created_at=row["created_at"],
+        )
+
+    async def user_count(self) -> int:
+        cursor = await self.db.execute(
+            "SELECT COUNT(*) AS n FROM users"
+        )
+        return int((await cursor.fetchone())["n"])
+
+    async def list_users(self) -> list[UserInfo]:
+        cursor = await self.db.execute(
+            "SELECT id, username, is_admin, is_active, created_at "
+            "FROM users ORDER BY username"
+        )
+        return [self._user_from_row(r) for r in await cursor.fetchall()]
+
+    async def get_user(self, user_id: str) -> UserInfo | None:
+        cursor = await self.db.execute(
+            "SELECT id, username, is_admin, is_active, created_at "
+            "FROM users WHERE id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return self._user_from_row(row) if row else None
+
+    async def get_user_auth(
+        self, username: str
+    ) -> tuple[UserInfo, str] | None:
+        """User row plus its password hash for credential checks."""
+        cursor = await self.db.execute(
+            "SELECT id, username, password_hash, is_admin, is_active, "
+            "created_at FROM users WHERE username = ?",
+            (username,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._user_from_row(row), row["password_hash"]
+
+    async def create_user(
+        self,
+        username: str,
+        password_hash: str,
+        *,
+        is_admin: bool = False,
+    ) -> UserInfo | None:
+        """Insert a user; None when the username is already taken."""
+        user_id = uuid.uuid4().hex
+        async with self._write_lock:
+            try:
+                await self.db.execute(
+                    "INSERT INTO users ("
+                    "id, username, password_hash, is_admin, is_active, "
+                    "created_at"
+                    ") VALUES (?, ?, ?, ?, 1, ?)",
+                    (
+                        user_id,
+                        username,
+                        password_hash,
+                        int(is_admin),
+                        _utcnow(),
+                    ),
+                )
+            except aiosqlite.IntegrityError:
+                await self.db.rollback()
+                return None
+            await self.db.commit()
+        return await self.get_user(user_id)
+
+    async def update_user(
+        self,
+        user_id: str,
+        *,
+        is_active: bool | None = None,
+        is_admin: bool | None = None,
+    ) -> UserInfo | None:
+        async with self._write_lock:
+            if is_active is not None:
+                await self.db.execute(
+                    "UPDATE users SET is_active = ? WHERE id = ?",
+                    (int(is_active), user_id),
+                )
+            if is_admin is not None:
+                await self.db.execute(
+                    "UPDATE users SET is_admin = ? WHERE id = ?",
+                    (int(is_admin), user_id),
+                )
+            await self.db.commit()
+        return await self.get_user(user_id)
+
+    async def set_user_password(
+        self, user_id: str, password_hash: str
+    ) -> bool:
+        async with self._write_lock:
+            cursor = await self.db.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (password_hash, user_id),
+            )
+            await self.db.commit()
+            return cursor.rowcount == 1
+
+    async def seed_accounts(
+        self, accounts: dict[str, str], hash_password, verify_password
+    ) -> None:
+        """Upsert SMARTCV_ACCOUNTS env entries into the users table.
+
+        New usernames are inserted; existing ones get their password
+        re-synced so the env var stays authoritative for seeded users.
+        The first account becomes admin when no admin exists yet —
+        that guarantees at least one admin can manage the rest.
+        PBKDF2 runs in a thread: it is CPU-bound and this loop sits on
+        the event loop.
+        """
+        if not accounts:
+            return
+        cursor = await self.db.execute(
+            "SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1"
+        )
+        has_admin = await cursor.fetchone() is not None
+        async with self._write_lock:
+            for username, password in accounts.items():
+                cursor = await self.db.execute(
+                    "SELECT password_hash FROM users WHERE username = ?",
+                    (username,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    digest = await asyncio.to_thread(
+                        hash_password, password
+                    )
+                    await self.db.execute(
+                        "INSERT INTO users ("
+                        "id, username, password_hash, is_admin, "
+                        "is_active, created_at"
+                        ") VALUES (?, ?, ?, ?, 1, ?)",
+                        (
+                            uuid.uuid4().hex,
+                            username,
+                            digest,
+                            int(not has_admin),
+                            _utcnow(),
+                        ),
+                    )
+                    has_admin = True
+                elif not await asyncio.to_thread(
+                    verify_password, password, row["password_hash"]
+                ):
+                    digest = await asyncio.to_thread(
+                        hash_password, password
+                    )
+                    await self.db.execute(
+                        "UPDATE users SET password_hash = ? "
+                        "WHERE username = ?",
+                        (digest, username),
+                    )
+            await self.db.commit()
+
+    async def create_session(
+        self, user_id: str, ttl_seconds: int
+    ) -> str:
+        raw = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw.encode()).hexdigest()
+        expires_at = int(time.time()) + ttl_seconds
+        await self.db.execute(
+            "INSERT INTO sessions (token_hash, user_id, expires_at) "
+            "VALUES (?, ?, ?)",
+            (token_hash, user_id, expires_at),
+        )
+        await self.db.commit()
+        return raw
+
+    async def user_for_token(self, raw_token: str) -> UserInfo | None:
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        cursor = await self.db.execute(
+            "SELECT u.id, u.username, u.is_admin, u.is_active, "
+            "u.created_at, s.expires_at "
+            "FROM sessions s JOIN users u ON u.id = s.user_id "
+            "WHERE s.token_hash = ? AND u.is_active = 1",
+            (token_hash,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        if int(row["expires_at"]) < int(time.time()):
+            await self.db.execute(
+                "DELETE FROM sessions WHERE token_hash = ?",
+                (token_hash,),
+            )
+            await self.db.commit()
+            return None
+        return self._user_from_row(row)
+
+    async def delete_session(self, raw_token: str) -> None:
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+        await self.db.execute(
+            "DELETE FROM sessions WHERE token_hash = ?", (token_hash,)
+        )
+        await self.db.commit()
+
+    async def delete_user_sessions(self, user_id: str) -> int:
+        async with self._write_lock:
+            cursor = await self.db.execute(
+                "DELETE FROM sessions WHERE user_id = ?", (user_id,)
+            )
+            await self.db.commit()
+            return cursor.rowcount
+
+    async def purge_expired_sessions(self) -> None:
+        await self.db.execute(
+            "DELETE FROM sessions WHERE expires_at < ?",
+            (int(time.time()),),
+        )
+        await self.db.commit()

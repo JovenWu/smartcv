@@ -7,14 +7,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.app.admin import router as admin_router
 from backend.app.api import router as api_router
-from backend.app.auth import SessionStore, auth_router
+from backend.app.auth import auth_router
 from backend.app.config import Settings, get_settings
 from backend.app.database import SQLiteRepository
 from backend.app.events import EventHub, EventPublisher
 from backend.app.importer import create_importer
 from backend.app.reviewer import create_reviewer
 from backend.app.typesafe_adapter import create_evaluator
+from backend.app.users import hash_password, verify_password
 from backend.app.worker import CandidateWorkerPool
 
 logging.basicConfig(level=logging.INFO)
@@ -44,7 +46,6 @@ def create_app(
     app.state.evaluator_override = evaluator
     app.state.importer_override = importer
     app.state.reviewer_override = reviewer
-    app.state.sessions = SessionStore()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -60,6 +61,17 @@ def create_app(
         settings.previews_dir.mkdir(parents=True, exist_ok=True)
         repository = SQLiteRepository(settings.database_path)
         await repository.open()
+        # Seed env-configured accounts into the users table, then decide
+        # whether the app is gated. DB users keep auth on even if
+        # SMARTCV_ACCOUNTS is later emptied (managed accounts persist).
+        await repository.seed_accounts(
+            settings.demo_accounts, hash_password, verify_password
+        )
+        app.state.auth_enabled = (
+            bool(settings.demo_accounts)
+            or await repository.user_count() > 0
+        )
+        await repository.purge_expired_sessions()
         if app.state.evaluator_override is not None:
             active_evaluator, client = app.state.evaluator_override, None
         else:
@@ -124,6 +136,7 @@ def create_app(
         return {"status": "ok"}
 
     app.include_router(auth_router)
+    app.include_router(admin_router)
     app.include_router(api_router)
 
     # Serve the built SPA when frontend/dist exists (single-container

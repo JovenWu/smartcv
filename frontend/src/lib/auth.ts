@@ -2,6 +2,7 @@ export interface SessionInfo {
   auth_required: boolean
   authenticated: boolean
   username: string | null
+  is_admin: boolean
 }
 
 async function parseError(response: Response): Promise<Error> {
@@ -30,6 +31,7 @@ const UNAUTHENTICATED: SessionInfo = {
   auth_required: true,
   authenticated: false,
   username: null,
+  is_admin: false,
 }
 
 let session: SessionInfo | null = null
@@ -105,6 +107,21 @@ export async function logout(): Promise<void> {
   const response = await fetch("/api/auth/logout", { method: "POST" })
   if (!response.ok) throw await parseError(response)
   clearSession()
+}
+
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const response = await fetch("/api/auth/password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  })
+  if (!response.ok) throw await parseError(response)
 }
 
 /** Test hook — clears the cached session between tests. */

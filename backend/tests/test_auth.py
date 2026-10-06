@@ -59,6 +59,7 @@ def test_session_endpoint_reports_auth_state(gated_client):
         "auth_required": True,
         "authenticated": False,
         "username": None,
+        "is_admin": False,
     }
 
 
@@ -128,6 +129,7 @@ def test_no_accounts_configured_means_open_access(open_client):
         "auth_required": False,
         "authenticated": True,
         "username": None,
+        "is_admin": False,
     }
 
 

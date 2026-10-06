@@ -641,7 +641,7 @@ async def review_criterion(
         criterion_id,
         manual_fraction=_MATCH_LEVEL_FRACTION[body.match_level],
         review_note=body.review_note,
-        reviewed_by=current_username(request),
+        reviewed_by=await current_username(request),
     )
     if updated is None:
         raise HTTPException(

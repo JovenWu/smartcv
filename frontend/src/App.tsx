@@ -5,6 +5,7 @@ import {
   type Params,
 } from "react-router-dom"
 
+import { RequireAdmin } from "@/components/require-admin"
 import { RequireAuth } from "@/components/require-auth"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { AppLayout } from "@/layouts/app-layout"
@@ -12,6 +13,7 @@ import { getOpening } from "@/lib/openings"
 import LoginPage from "@/pages/login"
 import OpeningDetailPage from "@/pages/opening-detail"
 import OpeningsPage from "@/pages/openings"
+import UsersPage from "@/pages/users"
 
 const router = createBrowserRouter([
   { path: "/login", element: <LoginPage /> },
@@ -25,6 +27,16 @@ const router = createBrowserRouter([
             path: "/",
             element: <OpeningsPage />,
             handle: { crumbs: [{ label: "Openings" }] },
+          },
+          {
+            element: <RequireAdmin />,
+            children: [
+              {
+                path: "/users",
+                element: <UsersPage />,
+                handle: { crumbs: [{ label: "Users" }] },
+              },
+            ],
           },
           {
             path: "/openings/:id",

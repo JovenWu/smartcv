@@ -1,19 +1,27 @@
-"""Demo-gate session auth.
+"""DB-backed session auth, modeled on accordance's auth module.
 
-Enabled only when SMARTCV_ACCOUNTS is configured (a JSON map of
-username -> password, e.g. {"recruiter": "s3cret"}). With no accounts
-configured every route is open, which keeps local dev and the test
-suite credential-free. Sessions are in-memory tokens: a restart logs
-everyone out, which is acceptable for a demo deployment.
+Enabled when SMARTCV_ACCOUNTS is configured (seeded into the users
+table on startup) or the users table already has rows. With neither,
+every route is open, which keeps local dev and the test suite
+credential-free. Sessions live in the ``sessions`` table keyed by the
+SHA-256 of the raw token, so a restart no longer logs everyone out and
+disabling a user invalidates their sessions immediately.
 """
 
-import hmac
-import secrets
+import asyncio
 import time
 from collections import deque
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
+
+from backend.app.schemas import UserInfo
+from backend.app.users import (
+    MIN_PASSWORD_LEN,
+    hash_password,
+    verify_password,
+)
 
 SESSION_COOKIE = "smartcv_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
@@ -25,34 +33,16 @@ LOGIN_RATE_LIMIT_ATTEMPTS = 10
 LOGIN_RATE_LIMIT_WINDOW_SECONDS = 60.0
 
 
-class SessionStore:
-    """In-memory token -> username map with a fixed TTL per session."""
-
-    def __init__(self, ttl_seconds: int = SESSION_TTL_SECONDS) -> None:
-        self._ttl = ttl_seconds
-        self._sessions: dict[str, tuple[str, float]] = {}
-
-    def create(self, username: str) -> str:
-        token = secrets.token_hex(32)
-        self._sessions[token] = (username, time.time() + self._ttl)
-        return token
-
-    def get(self, token: str) -> str | None:
-        entry = self._sessions.get(token)
-        if entry is None:
-            return None
-        username, expires_at = entry
-        if expires_at < time.time():
-            self._sessions.pop(token, None)
-            return None
-        return username
-
-    def revoke(self, token: str) -> None:
-        self._sessions.pop(token, None)
+def _repository(request: Request):
+    return getattr(request.app.state, "repository", None)
 
 
-def _accounts(request: Request) -> dict[str, str]:
-    return request.app.state.settings.demo_accounts
+def _auth_enabled(request: Request) -> bool:
+    """Auth is on when the lifespan seeded accounts or users exist."""
+    enabled = getattr(request.app.state, "auth_enabled", None)
+    if enabled is not None:
+        return enabled
+    return request.app.state.settings.auth_enabled
 
 
 def _login_attempts(request: Request) -> dict[str, deque[float]]:
@@ -96,25 +86,48 @@ def _secure_cookie(request: Request) -> bool:
     )
 
 
-def _session_user(request: Request) -> str | None:
+async def _session_user(request: Request) -> UserInfo | None:
     token = request.cookies.get(SESSION_COOKIE)
-    if token is None:
+    repository = _repository(request)
+    if token is None or repository is None:
         return None
-    store: SessionStore = request.app.state.sessions
-    return store.get(token)
+    return await repository.user_for_token(token)
 
 
-def require_session(request: Request) -> None:
+async def require_session(request: Request) -> None:
     """Dependency: 401 unless auth is disabled or a valid session exists."""
-    if not _accounts(request):
+    if not _auth_enabled(request):
         return
-    if _session_user(request) is None:
+    if await _session_user(request) is None:
         raise HTTPException(status_code=401, detail="Authentication required")
 
 
-def current_username(request: Request) -> str:
+async def require_user(request: Request) -> UserInfo:
+    """Dependency: the signed-in user; 403 when auth is disabled."""
+    if not _auth_enabled(request):
+        raise HTTPException(
+            status_code=403,
+            detail="User management requires authentication",
+        )
+    user = await _session_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
+async def require_admin(
+    user: Annotated[UserInfo, Depends(require_user)],
+) -> UserInfo:
+    """Dependency: admin-only routes (user management)."""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    return user
+
+
+async def current_username(request: Request) -> str:
     """Session username for audit fields; 'local' when auth is disabled."""
-    return _session_user(request) or "local"
+    user = await _session_user(request)
+    return user.username if user is not None else "local"
 
 
 class LoginRequest(BaseModel):
@@ -122,10 +135,16 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1)
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=MIN_PASSWORD_LEN)
+
+
 class SessionInfo(BaseModel):
     auth_required: bool
     authenticated: bool
     username: str | None = None
+    is_admin: bool = False
 
 
 auth_router = APIRouter(prefix="/api/auth")
@@ -133,14 +152,22 @@ auth_router = APIRouter(prefix="/api/auth")
 
 @auth_router.post("/login", status_code=204)
 async def login(body: LoginRequest, request: Request, response: Response):
-    accounts = _accounts(request)
+    repository = _repository(request)
     ip = _client_ip(request)
-    expected = accounts.get(body.username)
-    if expected is not None and hmac.compare_digest(
-        expected, body.password
-    ):
+    ok = False
+    if repository is not None:
+        entry = await repository.get_user_auth(body.username)
+        if entry is not None:
+            user, digest = entry
+            if user.is_active:
+                ok = await asyncio.to_thread(
+                    verify_password, body.password, digest
+                )
+    if ok:
         _clear_failed_logins(request, ip)
-        token = request.app.state.sessions.create(body.username)
+        token = await repository.create_session(
+            user.id, SESSION_TTL_SECONDS
+        )
         response.set_cookie(
             SESSION_COOKIE,
             token,
@@ -163,17 +190,52 @@ async def login(body: LoginRequest, request: Request, response: Response):
 @auth_router.post("/logout", status_code=204)
 async def logout(request: Request, response: Response):
     token = request.cookies.get(SESSION_COOKIE)
-    if token:
-        request.app.state.sessions.revoke(token)
+    repository = _repository(request)
+    if token and repository is not None:
+        await repository.delete_session(token)
     response.delete_cookie(SESSION_COOKIE, path="/")
+
+
+@auth_router.post("/password", status_code=204)
+async def change_password(
+    body: ChangePasswordRequest,
+    request: Request,
+    response: Response,
+    user: Annotated[UserInfo, Depends(require_user)],
+):
+    """Self-service password change; keeps the current session alive."""
+    repository = _repository(request)
+    entry = await repository.get_user_auth(user.username)
+    if entry is None or not await asyncio.to_thread(
+        verify_password, body.current_password, entry[1]
+    ):
+        raise HTTPException(
+            status_code=400, detail="Current password is incorrect"
+        )
+    digest = await asyncio.to_thread(hash_password, body.new_password)
+    await repository.set_user_password(user.id, digest)
+    # Rotate every session, then hand this client a fresh cookie so the
+    # acting user is not logged out by their own change.
+    await repository.delete_user_sessions(user.id)
+    token = await repository.create_session(user.id, SESSION_TTL_SECONDS)
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=_secure_cookie(request),
+        max_age=SESSION_TTL_SECONDS,
+        path="/",
+    )
 
 
 @auth_router.get("/session", response_model=SessionInfo)
 async def session(request: Request) -> SessionInfo:
-    required = bool(_accounts(request))
-    username = _session_user(request)
+    required = _auth_enabled(request)
+    user = await _session_user(request)
     return SessionInfo(
         auth_required=required,
-        authenticated=not required or username is not None,
-        username=username,
+        authenticated=not required or user is not None,
+        username=user.username if user else None,
+        is_admin=user.is_admin if user else False,
     )

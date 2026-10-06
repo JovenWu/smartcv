@@ -142,6 +142,14 @@ class OpeningUpdate(ApiModel):
     criteria: list[Criterion] | None = None
 
 
+class UserInfo(ApiModel):
+    id: str
+    username: str
+    is_admin: bool = False
+    is_active: bool = True
+    created_at: datetime
+
+
 class EvidenceSpan(ApiModel):
     id: str
     page_number: int = Field(ge=1)
